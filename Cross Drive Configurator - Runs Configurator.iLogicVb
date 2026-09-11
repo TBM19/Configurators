@@ -1,0 +1,214 @@
+﻿Sub Main()
+
+    Dim oRawDoc As Document = ThisApplication.ActiveDocument
+
+    If oRawDoc Is Nothing Then
+        MessageBox.Show("No active document found.", "iLogic")
+        Exit Sub
+    End If
+
+    If oRawDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Run this rule in an assembly.", "iLogic")
+        Exit Sub
+    End If
+
+    Dim oAsm As AssemblyDocument = CType(oRawDoc, AssemblyDocument)
+    Dim oDef As AssemblyComponentDefinition = oAsm.ComponentDefinition
+    Dim oParams As Parameters = oDef.Parameters
+
+    Parameter.Quiet = True
+
+    Dim total As Integer
+    Try
+        total = CInt(oParams.Item("Quantity_of_Shoes").Value)
+    Catch
+        MessageBox.Show("Missing parameter: Quantity_of_Shoes", "iLogic")
+        Exit Sub
+    End Try
+
+    Dim A As Integer
+    Dim B As Integer
+    Dim C As Integer
+    Dim found As Boolean = False
+
+    For A = 1 To 10
+
+        B = total - 2 * A
+
+        If Math.Abs(A - B) <= 1 Then
+            C = A
+
+            oParams.Item("A1").Value = A
+            oParams.Item("B1").Value = B
+            oParams.Item("C1").Value = C
+
+            found = True
+            Exit For
+        End If
+
+    Next
+
+    If Not found Then
+        MessageBox.Show("No valid shoe layout found for Quantity_of_Shoes = " & total, "iLogic")
+        Exit Sub
+    End If
+
+    ' Parent calculations first
+    iLogicVb.RunExternalRule("Cross Drive Configurator\Cross Drive Configurator - Shoe Offset")
+    iLogicVb.RunExternalRule("Cross Drive Configurator\Cross Drive Configurator - Clamp Offset")
+	
+	' Sets Upper Support Holes
+    iLogicVb.RunExternalRule("Cross Drive Configurator\Cross Drive Configurator - Sets Upper Support Holes")
+	
+
+    ' Push values to child assemblies
+    iLogicVb.RunExternalRule("Cross Drive Configurator\Cross Drive Configurator - Pushes Parameters")
+	
+
+	' Active Cross Drive Assembly
+	iLogicVb.RunExternalRule("All Components\Sets Parameters and iProperties Units and Precision")
+	
+	' Child Components
+	RunRuleInComponentsByTitle( _
+	    oAsm, _
+	    "All Components\Sets Parameters and iProperties Units and Precision", _
+	    New String() {"CROSS DRIVE #1/3", "CROSS DRIVE CHANNEL #1/3", "CROSS DRIVE #2", "CROSS DRIVE CHANNEL #2"})
+	
+
+    ' Force rebuild before descriptions are generated
+    oAsm.Update2()
+	
+	
+
+    ' Generates descriptions for cross drive set, cross drive #1/3, cross drive #2, cross drive channel #1/3, cross drive channel #2
+    iLogicVb.RunExternalRule("Cross Drive Configurator\Cross Drive Configurator - Generates Descriptions")
+
+
+
+    oAsm.Update2()
+
+    MessageBox.Show("Configurator completed successfully.", "iLogic")
+
+End Sub
+
+
+
+Function RunRuleInComponentsByTitle( _
+    oAsm As AssemblyDocument, _
+    ruleName As String, _
+    allowedTitles() As String) As Boolean
+
+    Try
+
+        Dim iLogicAuto As Object = iLogicVb.Automation
+        Dim processedDocs As New System.Collections.Generic.HashSet(Of String)
+
+        RunRuleInComponentsByTitleRecursive( _
+            oAsm.ComponentDefinition.Occurrences, _
+            ruleName, _
+            allowedTitles, _
+            iLogicAuto, _
+            processedDocs)
+
+        Return True
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Rule execution failed:" & vbCrLf & vbCrLf & _
+            ruleName & vbCrLf & vbCrLf & _
+            ex.Message, _
+            "iLogic ERROR")
+
+        Return False
+
+    End Try
+
+End Function
+
+
+Function RunRuleInComponentsByTitleRecursive( _
+    occs As ComponentOccurrences, _
+    ruleName As String, _
+    allowedTitles() As String, _
+    iLogicAuto As Object, _
+    ByRef processedDocs As System.Collections.Generic.HashSet(Of String)) As Boolean
+
+    For Each oOcc As ComponentOccurrence In occs
+
+        Try
+
+            If oOcc.Suppressed Then GoTo ContinueLoop
+
+            Dim title As String = UCase(Trim(GetOccurrenceTitle(oOcc)))
+
+            For Each allowedTitle As String In allowedTitles
+
+                If title = UCase(Trim(allowedTitle)) Then
+
+                    Dim targetDoc As Document = oOcc.Definition.Document
+                    Dim docKey As String = UCase(targetDoc.FullFileName)
+
+                    If Not processedDocs.Contains(docKey) Then
+
+                        processedDocs.Add(docKey)
+
+                        Try
+                            targetDoc.Update2(True)
+                        Catch
+                        End Try
+
+                        iLogicAuto.RunExternalRule(targetDoc, ruleName)
+
+                        Try
+                            targetDoc.Update2(True)
+                        Catch
+                        End Try
+
+                    End If
+
+                    Exit For
+
+                End If
+
+            Next
+
+            If oOcc.DefinitionDocumentType = _
+                DocumentTypeEnum.kAssemblyDocumentObject Then
+
+                Dim subAsmDef As AssemblyComponentDefinition = _
+                    CType(oOcc.Definition, AssemblyComponentDefinition)
+
+                RunRuleInComponentsByTitleRecursive( _
+                    subAsmDef.Occurrences, _
+                    ruleName, _
+                    allowedTitles, _
+                    iLogicAuto, _
+                    processedDocs)
+
+            End If
+
+ContinueLoop:
+
+        Catch
+        End Try
+
+    Next
+
+    Return True
+
+End Function
+
+
+Function GetOccurrenceTitle(oOcc As ComponentOccurrence) As String
+
+    Try
+        Return CStr( _
+            oOcc.Definition.Document.PropertySets.Item( _
+            "Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+

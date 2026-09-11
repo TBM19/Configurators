@@ -1,0 +1,884 @@
+﻿'==================================================
+' GENERATES CROSS DRIVE DESCRIPTIONS
+'==================================================
+'
+' This rule updates descriptions for:
+'   1. The parent CROSS DRIVE SET assembly
+'   2. Components with Title = CROSS DRIVE #1/3
+'   3. Components with Title = CROSS DRIVE #2
+'   4. CROSS DRIVE CHANNEL components inside CROSS DRIVE #1/3
+'   5. CROSS DRIVE CHANNEL components inside CROSS DRIVE #2
+'
+' Component descriptions are built directly inside the processing section.
+'
+' Parent CROSS DRIVE SET:
+'   - Uses SC
+'   - Uses Quantity_of_Shoes
+'   - Uses Shoe_Style abbreviation
+'
+' CROSS DRIVE #1/3:
+'   - Uses SC123
+'   - Uses Shoe_Count1
+'   - Uses Shoe_Style abbreviation
+'
+' CROSS DRIVE #2:
+'   - Uses SC123
+'   - Uses Shoe_Count2
+'   - Uses Shoe_Style abbreviation
+'
+' CROSS DRIVE CHANNEL #1/3:
+'   - Uses SC123
+'   - Uses Shoe_Count1
+'   - Uses SHOES instead of Shoe_Style abbreviation
+'
+' CROSS DRIVE CHANNEL #2:
+'   - Uses SC123
+'   - Uses Shoe_Count2
+'   - Uses SHOES instead of Shoe_Style abbreviation
+'
+' SC123 is calculated from its numeric value but displayed in the same units as SC.
+'
+'==================================================
+
+
+Sub Main()
+
+    '==================================================
+    ' VALIDATE ACTIVE DOCUMENT
+    '==================================================
+
+    Dim oRawDoc As Document = ThisApplication.ActiveDocument
+
+    If oRawDoc Is Nothing Then
+        MessageBox.Show("No active document found.", "iLogic")
+        Exit Sub
+    End If
+
+    If oRawDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Run this rule in an assembly.", "iLogic")
+        Exit Sub
+    End If
+
+
+    '==================================================
+    ' GET PARENT CROSS DRIVE SET ASSEMBLY
+    '==================================================
+
+    Dim oParentAsm As AssemblyDocument = CType(oRawDoc, AssemblyDocument)
+    Dim oParentDef As AssemblyComponentDefinition = oParentAsm.ComponentDefinition
+    Dim oParams As Parameters = oParentDef.Parameters
+
+
+    '==================================================
+    ' SET UP REPORTING
+    '==================================================
+
+    Dim UpdatedCount As Integer = 0
+    Dim Report As String = ""
+
+    Dim FoundCrossDrive13 As Boolean = False
+    Dim FoundCrossDrive2 As Boolean = False
+    Dim FoundChannel13 As Boolean = False
+    Dim FoundChannel2 As Boolean = False
+
+
+    '==================================================
+    ' QUIET PARAMETER UPDATES
+    '==================================================
+
+    Parameter.Quiet = True
+
+
+    Try
+
+        '==================================================
+        ' READ SC DISPLAY VALUES
+        '==================================================
+        ' SC is used for the parent Cross Drive Set description.
+        ' SC123 is used for Cross Drive and Cross Drive Channel descriptions.
+        ' SC123 is evaluated numerically but displayed in the same units as SC.
+
+        Dim SC_Display As String = P(oParams, "SC")
+
+        Dim SC123_Display As String = GetLengthParamValueUsingReferenceUnits( _
+            oParentAsm, _
+            oParams, _
+            "SC123", _
+            SC_Display)
+
+
+        '==================================================
+        ' UPDATE PARENT CROSS DRIVE SET DESCRIPTION
+        '==================================================
+        ' Uses:
+        '   System
+        '   Bore_Size
+        '   CC
+        '   SC
+        '   Quantity_of_Shoes
+        '   Shoe_Style abbreviation
+
+        Try
+
+            Dim ParentDesc As String = _
+                "CROSS DRIVE SET, " & _
+                UCase(T(oParams, "System", "RX3")) & ", " & _
+                P(oParams, "Bore_Size") & " BORE, " & _
+                P(oParams, "CC") & " CC, " & _
+                SC_Display & " SC, " & _
+                V(oParams, "Quantity_of_Shoes", 0) & " " & _
+                GetShoeAbbreviation(T(oParams, "Shoe_Style", ""))
+
+            WriteDescription(oParentAsm, ParentDesc)
+
+            UpdatedCount += 1
+
+            Report &= "UPDATED: " & oParentAsm.DisplayName & " | CROSS DRIVE SET" & vbCrLf
+            Report &= "         " & ParentDesc & vbCrLf & vbCrLf
+
+        Catch exParent As Exception
+
+            Report &= "FAILED WRITE: PARENT CROSS DRIVE SET" & vbCrLf
+            Report &= "             " & exParent.Message & vbCrLf & vbCrLf
+
+        End Try
+
+
+        '==================================================
+        ' PROCESS CHILD OCCURRENCES
+        '==================================================
+        ' Loops through every occurrence in the parent assembly.
+        ' The recursive sub also searches nested subassemblies.
+        '
+        ' Cross Drive Channel descriptions depend on which Cross Drive
+        ' assembly they are found inside:
+        '
+        '   Inside CROSS DRIVE #1/3:
+        '       Uses Shoe_Count1 and ends with SHOES
+        '
+        '   Inside CROSS DRIVE #2:
+        '       Uses Shoe_Count2 and ends with SHOES
+
+        For Each oOcc As ComponentOccurrence In oParentDef.Occurrences
+
+            ProcessOccurrenceRecursive( _
+                oOcc, _
+                oParams, _
+                SC123_Display, _
+                "", _
+                UpdatedCount, _
+                Report, _
+                FoundCrossDrive13, _
+                FoundCrossDrive2, _
+                FoundChannel13, _
+                FoundChannel2)
+
+        Next
+
+
+        '==================================================
+        ' UPDATE TOP ASSEMBLY
+        '==================================================
+
+        Try
+            oParentAsm.Update2(True)
+        Catch
+        End Try
+
+
+    Catch exMain As Exception
+
+        Report &= "RULE ERROR:" & vbCrLf
+        Report &= exMain.Message & vbCrLf & vbCrLf
+
+
+    Finally
+
+        '==================================================
+        ' TURN PARAMETER QUIET BACK OFF
+        '==================================================
+
+        Parameter.Quiet = False
+
+    End Try
+
+
+    '==================================================
+    ' ADD NOT FOUND REPORTING
+    '==================================================
+
+    If Not FoundCrossDrive13 Then
+        Report &= "NOT FOUND: CROSS DRIVE #1/3" & vbCrLf & vbCrLf
+    End If
+
+    If Not FoundCrossDrive2 Then
+        Report &= "NOT FOUND: CROSS DRIVE #2" & vbCrLf & vbCrLf
+    End If
+
+    If Not FoundChannel13 Then
+        Report &= "NOT FOUND: CROSS DRIVE CHANNEL inside CROSS DRIVE #1/3" & vbCrLf & vbCrLf
+    End If
+
+    If Not FoundChannel2 Then
+        Report &= "NOT FOUND: CROSS DRIVE CHANNEL inside CROSS DRIVE #2" & vbCrLf & vbCrLf
+    End If
+
+
+    '==================================================
+    ' REPORT RESULTS
+    '==================================================
+
+    If Report = "" Then
+        Report = "No matching Cross Drive components were found."
+    End If
+
+    MessageBox.Show( _
+        "Updated Descriptions: " & UpdatedCount & _
+        vbCrLf & vbCrLf & _
+        Report, _
+        "Cross Drive Description Results")
+
+End Sub
+
+
+Sub ProcessOccurrenceRecursive( _
+    oOcc As ComponentOccurrence, _
+    oParams As Parameters, _
+    SC123_Display As String, _
+    ParentCrossDrive As String, _
+    ByRef UpdatedCount As Integer, _
+    ByRef Report As String, _
+    ByRef FoundCrossDrive13 As Boolean, _
+    ByRef FoundCrossDrive2 As Boolean, _
+    ByRef FoundChannel13 As Boolean, _
+    ByRef FoundChannel2 As Boolean)
+
+    Try
+
+        '==================================================
+        ' SKIP SUPPRESSED COMPONENTS
+        '==================================================
+
+        If oOcc Is Nothing Then Exit Sub
+        If oOcc.Suppressed Then Exit Sub
+
+
+        '==================================================
+        ' GET OCCURRENCE DOCUMENT AND TITLE
+        '==================================================
+
+        Dim oDoc As Document = GetOccurrenceDocument(oOcc)
+
+        If oDoc Is Nothing Then Exit Sub
+
+        Dim Title As String = GetOccurrenceMatchTitle(oOcc)
+
+        Dim Desc As String = ""
+        Dim Matched As Boolean = False
+
+
+        '==================================================
+        ' UPDATE CONTEXT IF THIS OCCURRENCE IS A CROSS DRIVE
+        '==================================================
+        ' This tells nested Cross Drive Channel parts whether they are
+        ' inside CROSS DRIVE #1/3 or CROSS DRIVE #2.
+
+        Dim CurrentCrossDrive As String = ParentCrossDrive
+
+        Select Case Title
+
+            Case "CROSS DRIVE #1/3"
+
+                CurrentCrossDrive = "CROSS DRIVE #1/3"
+
+            Case "CROSS DRIVE #2"
+
+                CurrentCrossDrive = "CROSS DRIVE #2"
+
+        End Select
+
+
+        '==================================================
+        ' BUILD COMPONENT DESCRIPTIONS
+        '==================================================
+        ' These descriptions use parent assembly parameters.
+        '
+        ' CROSS DRIVE #1/3:
+        '   System
+        '   Bore_Size
+        '   CC
+        '   SC123
+        '   Shoe_Count1
+        '   Shoe_Style abbreviation
+        '
+        ' CROSS DRIVE #2:
+        '   System
+        '   Bore_Size
+        '   CC
+        '   SC123
+        '   Shoe_Count2
+        '   Shoe_Style abbreviation
+        '
+        ' CROSS DRIVE CHANNEL #1/3:
+        '   System
+        '   Bore_Size
+        '   CC
+        '   SC123
+        '   Shoe_Count1
+        '   SHOES
+        '
+        ' CROSS DRIVE CHANNEL #2:
+        '   System
+        '   Bore_Size
+        '   CC
+        '   SC123
+        '   Shoe_Count2
+        '   SHOES
+
+        Select Case Title
+
+
+            Case "CROSS DRIVE #1/3"
+
+                Matched = True
+                FoundCrossDrive13 = True
+
+                Desc = _
+                    "CROSS DRIVE #1/3, " & _
+                    UCase(T(oParams, "System", "RX3")) & ", " & _
+                    P(oParams, "Bore_Size") & " BORE, " & _
+                    P(oParams, "CC") & " CC, " & _
+                    SC123_Display & " SC, " & _
+                    V(oParams, "Shoe_Count1", 0) & " " & _
+                    GetShoeAbbreviation(T(oParams, "Shoe_Style", ""))
+
+
+            Case "CROSS DRIVE #2"
+
+                Matched = True
+                FoundCrossDrive2 = True
+
+                Desc = _
+                    "CROSS DRIVE #2, " & _
+                    UCase(T(oParams, "System", "RX3")) & ", " & _
+                    P(oParams, "Bore_Size") & " BORE, " & _
+                    P(oParams, "CC") & " CC, " & _
+                    SC123_Display & " SC, " & _
+                    V(oParams, "Shoe_Count2", 0) & " " & _
+                    GetShoeAbbreviation(T(oParams, "Shoe_Style", ""))
+
+        End Select
+
+
+        '==================================================
+        ' BUILD CROSS DRIVE CHANNEL DESCRIPTION
+        '==================================================
+        ' The actual channel title can be:
+        '   CROSS DRIVE CHANNEL
+        '
+        ' The output description changes based on the Cross Drive assembly
+        ' it is found inside.
+
+        If Not Matched Then
+
+            If InStr(Title, "CROSS DRIVE CHANNEL") > 0 Then
+
+
+                '==================================================
+                ' CROSS DRIVE CHANNEL #1/3
+                '==================================================
+                ' Uses:
+                '   System
+                '   Bore_Size
+                '   CC
+                '   SC123
+                '   Shoe_Count1
+                '   SHOES
+                '
+                ' Shoe_Style is NOT used for this description.
+
+                If CurrentCrossDrive = "CROSS DRIVE #1/3" Then
+
+                    Matched = True
+                    FoundChannel13 = True
+
+                    Desc = _
+                        "CROSS DRIVE CHANNEL #1/3, " & _
+                        UCase(T(oParams, "System", "RX3")) & ", " & _
+                        P(oParams, "Bore_Size") & " BORE, " & _
+                        P(oParams, "CC") & " CC, " & _
+                        SC123_Display & " SC, " & _
+                        V(oParams, "Shoe_Count1", 0) & " SHOES"
+
+
+                '==================================================
+                ' CROSS DRIVE CHANNEL #2
+                '==================================================
+                ' Uses:
+                '   System
+                '   Bore_Size
+                '   CC
+                '   SC123
+                '   Shoe_Count2
+                '   SHOES
+                '
+                ' Shoe_Style is NOT used for this description.
+
+                ElseIf CurrentCrossDrive = "CROSS DRIVE #2" Then
+
+                    Matched = True
+                    FoundChannel2 = True
+
+                    Desc = _
+                        "CROSS DRIVE CHANNEL #2, " & _
+                        UCase(T(oParams, "System", "RX3")) & ", " & _
+                        P(oParams, "Bore_Size") & " BORE, " & _
+                        P(oParams, "CC") & " CC, " & _
+                        SC123_Display & " SC, " & _
+                        V(oParams, "Shoe_Count2", 0) & " SHOES"
+
+                End If
+
+            End If
+
+        End If
+
+
+        '==================================================
+        ' WRITE COMPONENT DESCRIPTION
+        '==================================================
+
+        If Matched Then
+
+            Try
+
+                WriteDescription(oDoc, Desc)
+
+                UpdatedCount += 1
+
+				Report &= "UPDATED: " & oDoc.DisplayName & vbCrLf
+				Report &= "         " & Desc & vbCrLf & vbCrLf
+
+            Catch exWrite As Exception
+
+                Report &= "FAILED WRITE: " & oOcc.Name & " | " & Title & vbCrLf
+                Report &= "             " & exWrite.Message & vbCrLf & vbCrLf
+
+            End Try
+
+        End If
+
+
+        '==================================================
+        ' RECURSE INTO SUBASSEMBLIES
+        '==================================================
+
+        If oOcc.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            Dim SubDef As AssemblyComponentDefinition = TryCast(oOcc.Definition, AssemblyComponentDefinition)
+
+            If Not SubDef Is Nothing Then
+
+                For Each SubOcc As ComponentOccurrence In SubDef.Occurrences
+
+                    ProcessOccurrenceRecursive( _
+                        SubOcc, _
+                        oParams, _
+                        SC123_Display, _
+                        CurrentCrossDrive, _
+                        UpdatedCount, _
+                        Report, _
+                        FoundCrossDrive13, _
+                        FoundCrossDrive2, _
+                        FoundChannel13, _
+                        FoundChannel2)
+
+                Next
+
+            End If
+
+        End If
+
+
+    Catch ex As Exception
+
+        Try
+            Report &= "FAILED OCCURRENCE: " & oOcc.Name & vbCrLf
+            Report &= "                  " & ex.Message & vbCrLf & vbCrLf
+        Catch
+            Report &= "FAILED OCCURRENCE: Unknown occurrence" & vbCrLf
+            Report &= "                  " & ex.Message & vbCrLf & vbCrLf
+        End Try
+
+    End Try
+
+End Sub
+
+
+Function GetOccurrenceDocument(oOcc As ComponentOccurrence) As Document
+
+    '==================================================
+    ' GET DOCUMENT FROM OCCURRENCE
+    '==================================================
+
+    Try
+        Return CType(oOcc.Definition.Document, Document)
+    Catch
+        Return Nothing
+    End Try
+
+End Function
+
+
+Function GetOccurrenceMatchTitle(oOcc As ComponentOccurrence) As String
+
+    '==================================================
+    ' GET OCCURRENCE MATCH TITLE
+    '==================================================
+    ' Tries to identify the component using:
+    '   1. Document iProperty Title
+    '   2. Occurrence Name
+    '   3. Document Display Name
+
+    Try
+
+        Dim TitleText As String = NormalizeTitle(GetOccurrenceTitle(oOcc))
+
+        If TitleText <> "" Then
+            Return TitleText
+        End If
+
+        Dim OccName As String = NormalizeTitle(GetOccurrenceNameOnly(oOcc))
+
+        If OccName <> "" Then
+            Return OccName
+        End If
+
+        Dim DocName As String = NormalizeTitle(GetOccurrenceDocumentDisplayName(oOcc))
+
+        Return DocName
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function GetOccurrenceTitle(oOcc As ComponentOccurrence) As String
+
+    '==================================================
+    ' GET OCCURRENCE DOCUMENT TITLE IPROPERTY
+    '==================================================
+
+    Try
+        Return CStr(oOcc.Definition.Document.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function GetOccurrenceNameOnly(oOcc As ComponentOccurrence) As String
+
+    '==================================================
+    ' GET OCCURRENCE NAME
+    '==================================================
+
+    Try
+        Return CStr(oOcc.Name)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function GetOccurrenceDocumentDisplayName(oOcc As ComponentOccurrence) As String
+
+    '==================================================
+    ' GET OCCURRENCE DOCUMENT DISPLAY NAME
+    '==================================================
+
+    Try
+        Return CStr(oOcc.Definition.Document.DisplayName)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Sub WriteDescription(oDoc As Document, Desc As String)
+
+    '==================================================
+    ' WRITE DESCRIPTION IPROPERTY
+    '==================================================
+
+    oDoc.PropertySets.Item("Design Tracking Properties").Item("Description").Value = Desc
+
+    Try
+
+        If oDoc.DocumentType = DocumentTypeEnum.kPartDocumentObject Then
+
+            CType(oDoc, PartDocument).Update2(True)
+
+        ElseIf oDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            CType(oDoc, AssemblyDocument).Update2(True)
+
+        End If
+
+    Catch
+    End Try
+
+    If oDoc.Dirty Then
+        oDoc.Save2(True)
+    End If
+
+End Sub
+
+
+Function P(oParams As Parameters, ParamName As String) As String
+
+    '==================================================
+    ' SHORTCUT FOR PARAMETER EXPRESSION TEXT
+    '==================================================
+    ' Pulls the parameter Equation/Expression text.
+    '
+    ' Example:
+    '   5.0 in becomes 5.0in
+    '   97 mm becomes 97mm
+
+    Return GetParamExpressionText(oParams, ParamName)
+
+End Function
+
+
+Function T(oParams As Parameters, ParamName As String, DefaultValue As String) As String
+
+    '==================================================
+    ' SHORTCUT FOR TEXT PARAMETER VALUE
+    '==================================================
+
+    Try
+        Return CStr(oParams.Item(ParamName).Value)
+    Catch
+        Return DefaultValue
+    End Try
+
+End Function
+
+
+Function V(oParams As Parameters, ParamName As String, DefaultValue As Object) As String
+
+    '==================================================
+    ' SHORTCUT FOR NUMERIC PARAMETER VALUE
+    '==================================================
+
+    Try
+        Return CStr(oParams.Item(ParamName).Value)
+    Catch
+        Return CStr(DefaultValue)
+    End Try
+
+End Function
+
+
+Function GetParamExpressionText(oParams As Parameters, ParamName As String) As String
+
+    '==================================================
+    ' GET PARAMETER EXPRESSION TEXT
+    '==================================================
+
+    Try
+
+        Dim TextValue As String = oParams.Item(ParamName).Expression
+
+        TextValue = CleanUnitText(TextValue)
+
+        Return TextValue
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function GetLengthParamValueUsingReferenceUnits( _
+    oAsm As AssemblyDocument, _
+    oParams As Parameters, _
+    ParamName As String, _
+    ReferenceDisplay As String) As String
+
+    '==================================================
+    ' GET LENGTH VALUE USING REFERENCE UNITS
+    '==================================================
+    ' SC123 is stored internally in Inventor database length units.
+    ' This converts it to match the display units used by SC.
+    '
+    ' If SC contains mm, SC123 displays as mm.
+    ' Otherwise, SC123 displays as inches.
+
+    Try
+
+        Dim oUOM As UnitsOfMeasure = oAsm.UnitsOfMeasure
+        Dim oParam As Parameter = oParams.Item(ParamName)
+
+        Dim RawValue As Double = CDbl(oParam.Value)
+        Dim RefText As String = LCase(Trim(ReferenceDisplay))
+
+        Dim ConvertedValue As Double = 0
+        Dim UnitText As String = ""
+
+        If InStr(RefText, "mm") > 0 Then
+
+            ConvertedValue = oUOM.ConvertUnits( _
+                RawValue, _
+                UnitsTypeEnum.kDatabaseLengthUnits, _
+                UnitsTypeEnum.kMillimeterLengthUnits)
+
+            UnitText = "mm"
+
+        Else
+
+            ConvertedValue = oUOM.ConvertUnits( _
+                RawValue, _
+                UnitsTypeEnum.kDatabaseLengthUnits, _
+                UnitsTypeEnum.kInchLengthUnits)
+
+            UnitText = "in"
+
+        End If
+
+        Return FormatNumberText(ConvertedValue) & UnitText
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function FormatNumberText(Value As Double) As String
+
+    '==================================================
+    ' FORMAT NUMBER TEXT
+    '==================================================
+    ' Removes unnecessary trailing decimals.
+    '
+    ' Examples:
+    '   12.0000 becomes 12
+    '   12.5000 becomes 12.5
+    '   12.3750 becomes 12.375
+
+    Dim RoundedValue As Double = Math.Round(Value, 4)
+
+    If Math.Abs(RoundedValue - Math.Round(RoundedValue, 0)) < 0.0001 Then
+        Return CStr(CInt(Math.Round(RoundedValue, 0)))
+    End If
+
+    Return RoundedValue.ToString("0.####")
+
+End Function
+
+
+Function CleanUnitText(TextValue As String) As String
+
+    '==================================================
+    ' CLEAN UNIT TEXT
+    '==================================================
+    ' Removes spaces between values and units.
+    '
+    ' Example:
+    '   5.0 in becomes 5.0in
+    '   97 mm becomes 97mm
+
+    Try
+
+        TextValue = Trim(TextValue)
+
+        TextValue = Replace(TextValue, " mm", "mm")
+        TextValue = Replace(TextValue, " in", "in")
+        TextValue = Replace(TextValue, " cm", "cm")
+        TextValue = Replace(TextValue, " m", "m")
+
+        Return TextValue
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function GetShoeAbbreviation(ShoeText As String) As String
+
+    '==================================================
+    ' GET SHOE ABBREVIATION
+    '==================================================
+    ' Pulls abbreviation from inside parentheses.
+    '
+    ' Example:
+    '   Long Shoe (LSNH)
+    ' returns:
+    '   LSNH
+
+    Try
+
+        Dim s As String = Trim(ShoeText)
+
+        If s = "" Then
+            Return ""
+        End If
+
+        If InStr(s, "(") > 0 And InStr(s, ")") > 0 Then
+            Return s.Substring(s.LastIndexOf("(") + 1).Replace(")", "")
+        End If
+
+        Return s
+
+    Catch
+        Return ShoeText
+    End Try
+
+End Function
+
+
+Function NormalizeTitle(TitleText As String) As String
+
+    '==================================================
+    ' NORMALIZE TITLE TEXT
+    '==================================================
+    ' Makes matching more reliable by:
+    '   - Converting to uppercase
+    '   - Replacing & with /
+    '   - Removing file extensions
+    '   - Removing occurrence instance numbers after :
+    '   - Removing extra spaces
+
+    Try
+
+        Dim Title As String = UCase(Trim(TitleText))
+
+        Title = Replace(Title, "&", "/")
+        Title = Replace(Title, ".IAM", "")
+        Title = Replace(Title, ".IPT", "")
+
+        If InStr(Title, ":") > 0 Then
+            Title = Left(Title, InStrRev(Title, ":") - 1)
+        End If
+
+        Do While InStr(Title, "  ") > 0
+            Title = Replace(Title, "  ", " ")
+        Loop
+
+        Return Title
+
+    Catch
+        Return ""
+    End Try
+
+End Function

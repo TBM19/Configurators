@@ -1,0 +1,41 @@
+﻿Sub Main()
+
+    Dim oRawDoc As Document = ThisApplication.ActiveDocument
+
+    If oRawDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Run this rule in an assembly.", "iLogic")
+        Exit Sub
+    End If
+
+    Dim oAsm As AssemblyDocument = CType(oRawDoc, AssemblyDocument)
+    Dim oDef As AssemblyComponentDefinition = oAsm.ComponentDefinition
+    Dim oParams As Parameters = oDef.Parameters
+
+    Try
+
+        ' Shoe Offset
+        If oParams.Item("A1").Value = oParams.Item("B1").Value Then
+
+            oParams.Item("Shoe_Offset1").Value = _
+                (((oParams.Item("Quantity_of_Shoes").Value - 1) * oParams.Item("SC").Value) / 2)
+
+        ElseIf oParams.Item("Shoe_Count1").Value > oParams.Item("Shoe_Count2").Value Then
+
+            oParams.Item("Shoe_Offset1").Value = _
+                (((oParams.Item("Quantity_of_Shoes").Value - 1) * oParams.Item("SC").Value) / 2)
+
+        ElseIf oParams.Item("Shoe_Count1").Value < oParams.Item("Shoe_Count2").Value Then
+
+            oParams.Item("Shoe_Offset1").Value = _
+                ((((oParams.Item("Quantity_of_Shoes").Value - 1) * oParams.Item("SC").Value) / 2) - _
+                oParams.Item("SC").Value)
+
+        End If
+
+        oAsm.Update2()
+
+    Catch ex As Exception
+        MessageBox.Show("Shoe Offset rule failed: " & ex.Message, "Error")
+    End Try
+
+End Sub

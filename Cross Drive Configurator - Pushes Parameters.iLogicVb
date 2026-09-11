@@ -1,0 +1,130 @@
+﻿Sub Main()
+
+    Dim oRawDoc As Document = ThisApplication.ActiveDocument
+
+    If oRawDoc Is Nothing Then
+        MessageBox.Show("No active document found.", "iLogic")
+        Exit Sub
+    End If
+
+    If oRawDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Run this rule in an assembly.", "iLogic")
+        Exit Sub
+    End If
+
+    Dim oAsm As AssemblyDocument = CType(oRawDoc, AssemblyDocument)
+    Dim oDef As AssemblyComponentDefinition = oAsm.ComponentDefinition
+
+    Parameter.Quiet = True
+
+    Dim count As Integer = 0
+
+    For Each oOcc As ComponentOccurrence In oDef.Occurrences
+        ProcessOccurrenceRecursive(oOcc, count)
+    Next
+
+    oAsm.Update2()
+
+    Try
+        iLogicForm.Close("Crossdrive Configurator")
+    Catch
+    End Try
+
+    MessageBox.Show("Updated parameters in " & count & " components.", "iLogic")
+
+End Sub
+
+
+Sub ProcessOccurrenceRecursive(oOcc As ComponentOccurrence, ByRef count As Integer)
+
+    Try
+        If oOcc.Suppressed Then Exit Sub
+
+        Dim title As String = UCase(Trim(GetOccurrenceTitle(oOcc)))
+        Dim pushedAny As Boolean = False
+
+        '========================================
+        ' CROSS DRIVE #1/3
+        '========================================
+        If title = "CROSS DRIVE #1/3" Then
+            pushedAny = PushIfExists(oOcc.Name, "SC", Parameter("SC")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Quantity_of_Shoes", Parameter("Quantity_of_Shoes")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "CC", Parameter("CC")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Shoe_Offset1", Parameter("Shoe_Offset1")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Shoe_Count1", Parameter("Shoe_Count1")) Or pushedAny
+        End If
+
+        '========================================
+        ' CROSS DRIVE #2
+        '========================================
+        If title = "CROSS DRIVE #2" Then
+            pushedAny = PushIfExists(oOcc.Name, "SC", Parameter("SC")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Quantity_of_Shoes", Parameter("Quantity_of_Shoes")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "CC", Parameter("CC")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Shoe_Count2", Parameter("Shoe_Count2")) Or pushedAny
+        End If
+
+        '========================================
+        ' CROSS DRIVE CHANNEL #1/3
+        '========================================
+        If title = "CROSS DRIVE CHANNEL #1/3" Then
+            pushedAny = PushIfExists(oOcc.Name, "XDR3_Width", Parameter("XDR1")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Shoe_Count1", Parameter("Shoe_Count1")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "SC", Parameter("SC")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Sets_Supports_Holes", Parameter("Sets_Supports_Holes")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Clamp_Offset1", Parameter("Clamp_Offset1")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "CC", Parameter("CC")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Quantity_of_Shoes", Parameter("Quantity_of_Shoes")) Or pushedAny
+        End If
+
+        '========================================
+        ' CROSS DRIVE CHANNEL #2
+        '========================================
+        If title = "CROSS DRIVE CHANNEL #2" Then
+            pushedAny = PushIfExists(oOcc.Name, "XDR2_Width", Parameter("XDR2")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Shoe_Count2", Parameter("Shoe_Count2")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "SC", Parameter("SC")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Quantity_of_Shoes", Parameter("Quantity_of_Shoes")) Or pushedAny
+            pushedAny = PushIfExists(oOcc.Name, "Sets_Supports_Holes", Parameter("Sets_Supports_Holes")) Or pushedAny
+        End If
+
+        If pushedAny Then count += 1
+
+        ' Recurse into subassemblies
+        If oOcc.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+            Dim subDef As AssemblyComponentDefinition = TryCast(oOcc.Definition, AssemblyComponentDefinition)
+
+            If Not subDef Is Nothing Then
+                For Each subOcc As ComponentOccurrence In subDef.Occurrences
+                    ProcessOccurrenceRecursive(subOcc, count)
+                Next
+            End If
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+Function PushIfExists(occName As String, paramName As String, paramValue As Object) As Boolean
+
+    Try
+        Parameter(occName, paramName) = paramValue
+        Return True
+    Catch
+        Return False
+    End Try
+
+End Function
+
+
+Function GetOccurrenceTitle(oOcc As ComponentOccurrence) As String
+    Try
+        Return CStr(oOcc.Definition.Document.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+End Function
+
+

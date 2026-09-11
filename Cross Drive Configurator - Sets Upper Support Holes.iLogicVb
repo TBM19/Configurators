@@ -1,0 +1,99 @@
+﻿Sub Main()
+
+    ' Get the active document and parameter collection
+    Dim oDoc As Document = ThisDoc.Document
+    Dim oParams As Parameters = oDoc.ComponentDefinition.Parameters
+    Dim uom As UnitsOfMeasure = oDoc.UnitsOfMeasure
+
+    ' Find required parameters
+    Dim qtyParam As Inventor.Parameter = FindParameter(oParams, "Quantity_of_Shoes")
+    Dim locParam As Inventor.Parameter = FindParameter(oParams, "Sets_Supports_Holes")
+    Dim scParam As Inventor.Parameter = FindParameter(oParams, "SC")
+    Dim ccParam As Inventor.Parameter = FindParameter(oParams, "CC")
+
+    ' Verify parameters exist
+    If qtyParam Is Nothing Then
+        MessageBox.Show("Parameter not found: Quantity_of_Shoes")
+        Exit Sub
+    End If
+
+    If locParam Is Nothing Then
+        MessageBox.Show("Parameter not found: Sets_Supports_Holes")
+        Exit Sub
+    End If
+
+    If scParam Is Nothing Then
+        MessageBox.Show("Parameter not found: SC")
+        Exit Sub
+    End If
+
+    If ccParam Is Nothing Then
+        MessageBox.Show("Parameter not found: CC")
+        Exit Sub
+    End If
+
+    ' Get quantity of shoes
+    Dim qty As Integer = CInt(qtyParam.Value)
+
+    ' Convert SC from database units to inches
+    Dim scValue As Double
+    scValue = uom.ConvertUnits(scParam.Value, _
+                               UnitsTypeEnum.kDatabaseLengthUnits, _
+                               UnitsTypeEnum.kInchLengthUnits)
+
+    ' Convert CC from database units to inches
+    Dim ccValue As Double
+    ccValue = uom.ConvertUnits(ccParam.Value, _
+                               UnitsTypeEnum.kDatabaseLengthUnits, _
+                               UnitsTypeEnum.kInchLengthUnits)
+
+    ' Required span = cylinder center plus the distance of the cross drive gusset plate. 
+	' If this equation ever changes Drive Assembly Configurator - Sets Cross Drive Supports rule needs To change As well.
+    Dim requiredSpan As Double = ccValue + 5.125
+
+    ' Set the starting value based on whether the quantity is odd or even
+    Dim supportValue As Double
+
+    If qty Mod 2 = 1 Then
+        supportValue = 2      ' Odd quantity
+    Else
+        supportValue = 2.5    ' Even quantity
+    End If
+
+    ' Increase support value until the required span is met
+    Do While supportValue * scValue < requiredSpan
+        supportValue = supportValue + 1
+    Loop
+
+    ' Might need something like this comment for if a different upper cross drive support style is ever used example v floor upper cross drive support
+	' If SC Is 10", double the Sets_Supports_Holes value
+    ' If Math.Abs(scValue - 10.0) < 0.001 Then
+    '    supportValue = supportValue * 2
+   	' End If
+
+    ' Update the parameter
+    locParam.Expression = supportValue.ToString(System.Globalization.CultureInfo.InvariantCulture)
+
+    ' Push parameter changes and update model
+    RuleParametersOutput()
+    InventorVb.DocumentUpdate()
+
+End Sub
+
+
+Function FindParameter(oParams As Parameters, paramName As String) As Inventor.Parameter
+
+    ' Search user parameters
+    For Each p As Inventor.Parameter In oParams.UserParameters
+        If p.Name = paramName Then Return p
+    Next
+
+    ' Search model parameters
+    For Each p As Inventor.Parameter In oParams.ModelParameters
+        If p.Name = paramName Then Return p
+    Next
+
+    ' Parameter not found
+    Return Nothing
+
+End Function
