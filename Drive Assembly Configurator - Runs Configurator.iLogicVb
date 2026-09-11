@@ -1,0 +1,1305 @@
+﻿Sub Main()
+
+    Dim oAsm As AssemblyDocument = TryCast(ThisDoc.Document, AssemblyDocument)
+
+    If oAsm Is Nothing Then
+        MessageBox.Show("Run this rule in a top-level drive assembly.", "iLogic")
+        Exit Sub
+    End If
+
+    Dim oProgressBar As Object = Nothing
+    Dim iCurrentStep As Long = 0
+
+    Try
+
+        '====================================================
+        ' PROGRESS BAR SETUP
+        '====================================================
+        oProgressBar = ThisApplication.CreateProgressBar( _
+            False, _
+            15, _
+            "Drive Assembly Configurator")
+
+        oProgressBar.Message = "Starting configurator..."
+        oProgressBar.UpdateProgress
+
+
+        '====================================================
+        ' START CONFIGURATION REPORT / CONFIRMATION
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Showing configuration report..."
+        oProgressBar.UpdateProgress
+
+        If Not ShowConfigurationReport(oAsm) Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+        '====================================================
+        ' RUN IN ACTIVE DRIVE ASSY
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Setting parameters and iProperty units in active assembly..."
+        oProgressBar.UpdateProgress
+
+		If Not RunRuleInActiveDocument( _
+		    oAsm, _
+		    "All Components\Sets Parameters and iProperties Units and Precision") Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+        '====================================================
+        ' RULE 1
+        ' RUNS IN ACTIVE DRIVE ASSEMBLY
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Searching, replacing, and creating drive assembly components..."
+        oProgressBar.UpdateProgress
+
+		If Not RunRuleInActiveDocument( _
+		    oAsm, _
+		    "Drive Assembly Configurator\Drive Assembly Configurator - Searches Replaces and Creates Drawings") Then
+		
+		    Try
+		        If oProgressBar IsNot Nothing Then oProgressBar.Close
+		    Catch
+		    End Try
+		
+		    Exit Sub
+		
+		End If
+		
+		
+		'====================================================
+		' CHECK SEARCH / REPLACE RESULTS FIRST
+		'
+		' If Rule 1 stopped before creating a new drive assy,
+		' do not try to rebind yet.
+		'====================================================
+		Dim stopAfterSearch As Boolean = False
+		Dim stopReason As String = ""
+		
+		Try
+		    stopAfterSearch = CBool(SharedVariable("DriveConfig_StopAfterSearch"))
+		Catch
+		    stopAfterSearch = False
+		End Try
+		
+		Try
+		    stopReason = CStr(SharedVariable("DriveConfig_StopReason"))
+		Catch
+		    stopReason = ""
+		End Try
+		
+		If stopAfterSearch Then
+		
+		    Try
+		        If oProgressBar IsNot Nothing Then oProgressBar.Close
+		    Catch
+		    End Try
+		
+		    If Trim(stopReason) = "" Then
+		        stopReason = "Search / replace rule requested configurator stop."
+		    End If
+		
+		    MessageBox.Show( _
+		        "Configurator stopped." & vbCrLf & vbCrLf & _
+		        stopReason, _
+		        "Required Components Missing")
+		
+		    Exit Sub
+		
+		End If
+		
+		
+		'====================================================
+		' AFTER SEARCH / REPLACE
+		' REBIND oAsm TO THE NEW DRIVE ASSEMBLY
+		'
+		' Everything after Rule 1 must run against the new
+		' copied assembly, not the template/source assembly.
+		'====================================================
+		If Not RebindToNewDriveAssembly(oAsm) Then
+		
+		    Try
+		        If oProgressBar IsNot Nothing Then oProgressBar.Close
+		    Catch
+		    End Try
+		
+		    Exit Sub
+		
+		End If
+
+
+
+
+        '====================================================
+        ' RULE 2
+        ' RUNS IN ACTIVE DRIVE ASSEMBLY
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Generating descriptions..."
+        oProgressBar.UpdateProgress
+
+		If Not RunRuleInActiveDocument( _
+		    oAsm, _
+		    "Drive Assembly Configurator\Drive Assembly Configurator - Generates Descriptions") Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+        '====================================================
+        ' RULE 5
+        ' RUNS IN ACTIVE DRIVE ASSEMBLY
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Pushing parameters into child components..."
+        oProgressBar.UpdateProgress
+
+		If Not RunRuleInActiveDocument( _
+		    oAsm, _
+		    "Drive Assembly Configurator\Drive Assembly Configurator - Pushes Parameters into Children") Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+        '====================================================
+        ' RULE 4
+        ' RUNS IN SELECTED CHILDREN IF THEY EXIST
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Setting parameter units in selected child components..."
+        oProgressBar.UpdateProgress
+
+        If Not RunRuleInComponentsByTitle( _
+            oAsm, _
+            "All Components\Sets Parameters and iProperties Units and Precision", _
+            New String() {"CROSSMEMBER", "DRIVE FRAME", "CYLINDER MOUNT", "CYLINDER MOUNT ASSY", "STIFFENER"}) Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+        '====================================================
+        ' RULE 6
+        ' RUNS ONLY IF THESE COMPONENTS EXIST:
+        ' - CYLINDER MOUNT
+        ' - STIFFENER
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Changing customer hole pattern..."
+        oProgressBar.UpdateProgress
+
+        If Not RunRuleInComponentsByTitle( _
+            oAsm, _
+            "Drive Assembly Configurator\Drive Assembly Configurator - Changes Customer Hole Pattern", _
+            New String() {"CYLINDER MOUNT", "STIFFENER"}) Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+        '====================================================
+        ' RULE 7
+        ' RUNS ONLY IF DRIVE FRAME EXISTS
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Checking drive frame and tie tube model states..."
+        oProgressBar.UpdateProgress
+
+        If ComponentExistsByTitle(oAsm, "DRIVE FRAME") Then
+
+            If Not RunRuleInComponentsByTitle( _
+                oAsm, _
+                "Drive Assembly Configurator\Drive Assembly Configurator - Model State Change Tie Tubes", _
+                New String() {"DRIVE FRAME"}) Then
+
+                Try
+                    If oProgressBar IsNot Nothing Then oProgressBar.Close
+                Catch
+                End Try
+
+                Exit Sub
+
+            End If
+
+        End If
+
+
+        '====================================================
+        ' RULE 8
+        ' RUNS IN ACTIVE DRIVE ASSEMBLY
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Changing controls model states..."
+        oProgressBar.UpdateProgress
+
+		If Not RunRuleInActiveDocument( _
+		    oAsm, _
+		    "Drive Assembly Configurator\Drive Assembly Configurator - Model State Change Controls") Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+
+		'====================================================
+		' RULE 9
+		' RUNS ONLY IF CROSSMEMBER EXISTS
+		'====================================================
+		iCurrentStep += 1
+		oProgressBar.Message = "Changing crossmember cutout..."
+		oProgressBar.UpdateProgress
+		
+		If Not RunRuleInComponentsByTitle( _
+		    oAsm, _
+		    "Drive Assembly Configurator\Drive Assembly Configurator - Changes Crossmember Cutout", _
+		    New String() {"CROSSMEMBER"}) Then
+		
+		    Try
+		        If oProgressBar IsNot Nothing Then oProgressBar.Close
+		    Catch
+		    End Try
+		
+		    Exit Sub
+		
+		End If
+
+
+
+
+        '====================================================
+        ' RULE 10
+        ' RUNS IN ACTIVE DRIVE ASSEMBLY
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Changing valve mount model states..."
+        oProgressBar.UpdateProgress
+
+		If Not RunRuleInActiveDocument( _
+		    oAsm, _
+		    "Drive Assembly Configurator\Drive Assembly Configurator - Model State Change Valve Mounts") Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+        '====================================================
+        ' RULE 11
+        ' RUNS IN ACTIVE DRIVE ASSEMBLY
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Setting cross drive supports..."
+        oProgressBar.UpdateProgress
+
+		If Not RunRuleInActiveDocument( _
+		    oAsm, _
+		    "Drive Assembly Configurator\Drive Assembly Configurator - Sets Cross Drive Supports") Then
+
+            Try
+                If oProgressBar IsNot Nothing Then oProgressBar.Close
+            Catch
+            End Try
+
+            Exit Sub
+
+        End If
+
+
+'        '====================================================
+'        ' RULE 12
+'        ' RUNS IN ACTIVE DRIVE ASSEMBLY
+'        '====================================================
+'        iCurrentStep += 1
+'        oProgressBar.Message = "Setting serial plate..."
+'        oProgressBar.UpdateProgress
+
+'		If Not RunRuleInActiveDocument( _
+'		    oAsm, _
+'		    "Drive Assembly Configurator\Drive Assembly Configurator - Sets Zip Tie Serial Plate") Then
+
+'            Try
+'                If oProgressBar IsNot Nothing Then oProgressBar.Close
+'            Catch
+'            End Try
+
+'            Exit Sub
+
+'        End If
+
+
+        '====================================================
+        ' FINAL SUMMARY REPORT
+        '====================================================
+        iCurrentStep += 1
+        oProgressBar.Message = "Building final summary report..."
+        oProgressBar.UpdateProgress
+
+        Try
+            If oProgressBar IsNot Nothing Then oProgressBar.Close
+        Catch
+        End Try
+
+        ShowFinalPartSummaryReport(oAsm)
+
+    Catch ex As Exception
+
+        Try
+            If oProgressBar IsNot Nothing Then oProgressBar.Close
+        Catch
+        End Try
+
+        MessageBox.Show( _
+            "Unexpected failure:" & vbCrLf & vbCrLf & _
+            ex.Message, _
+            "iLogic ERROR")
+
+    End Try
+
+End Sub
+
+
+'====================================================
+' SHOW CONFIGURATION REPORT
+'
+' If user clicks OK:
+'     Returns True and configurator continues.
+'
+' If user clicks Cancel:
+'     Returns False and configurator stops immediately.
+'====================================================
+Function ShowConfigurationReport(oAsm As AssemblyDocument) As Boolean
+
+    Try
+
+        Dim msg As String = ""
+
+        msg &= "CONFIGURATION SELECTED" & vbCrLf
+        msg &= "====================================" & vbCrLf
+        msg &= "Assembly: " & oAsm.DisplayName & vbCrLf
+        msg &= "Part Number: " & GetDocumentPartNumber(oAsm) & vbCrLf
+        msg &= "Description: " & GetDocumentDescription(oAsm) & vbCrLf
+        msg &= "====================================" & vbCrLf
+        msg &= vbCrLf
+        msg &= "Selected Parameters:" & vbCrLf
+        msg &= "------------------------------------" & vbCrLf
+
+        Dim userParams As UserParameters = Nothing
+
+        Try
+            userParams = oAsm.ComponentDefinition.Parameters.UserParameters
+        Catch
+            userParams = Nothing
+        End Try
+
+        If userParams Is Nothing OrElse userParams.Count = 0 Then
+
+            msg &= "No user parameters found in active assembly." & vbCrLf
+
+        Else
+
+            For Each oParam As UserParameter In userParams
+
+                Try
+                    msg &= oParam.Name & " = " & GetParameterValueText(oParam) & vbCrLf
+                Catch
+                End Try
+
+            Next
+
+        End If
+
+        msg &= vbCrLf
+        msg &= "Confirm Configuration?" & vbCrLf
+        msg &= "Press OK to continue." & vbCrLf
+        msg &= "Press Cancel to stop the configurator."
+
+        If MsgBox(msg, vbOKCancel + vbQuestion, "Drive Assembly Configuration") <> vbOK Then
+            Return False
+        End If
+
+        Return True
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Could not build the configuration report." & vbCrLf & vbCrLf & _
+            "Error:" & vbCrLf & _
+            ex.Message, _
+            "Configuration Report Error")
+
+        Return False
+
+    End Try
+
+End Function
+
+
+'====================================================
+' GET PARAMETER VALUE TEXT
+'
+' Returns the cleanest available value for a user parameter.
+' Expression is usually best because it shows named/text
+' selections clearly.
+'====================================================
+Function GetParameterValueText(oParam As UserParameter) As String
+
+    Try
+        If Trim(CStr(oParam.Expression)) <> "" Then
+            Return CStr(oParam.Expression)
+        End If
+    Catch
+    End Try
+
+    Try
+        Return CStr(oParam.Value)
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+'====================================================
+' SHOW FINAL PART SUMMARY REPORT
+'
+' This is the only normal report shown at the end.
+'
+' It always shows the active Drive Assembly.
+'
+' It only shows the other requested component types if
+' they actually exist somewhere in the assembly tree.
+'====================================================
+Sub ShowFinalPartSummaryReport(oAsm As AssemblyDocument)
+
+    Try
+
+        Dim msg As String = ""
+
+        msg &= "CONFIGURATION COMPLETE" & vbCrLf
+        msg &= "====================================" & vbCrLf
+        msg &= vbCrLf
+
+        '================================================
+        ' DRIVE ASSEMBLY
+        ' Active top-level assembly is always included.
+        '================================================
+        msg &= BuildSummaryLine("DRIVE ASSEMBLY", oAsm)
+        msg &= vbCrLf
+
+        '================================================
+        ' OPTIONAL COMPONENTS
+        ' These are only added if the matching Title exists.
+        '================================================
+        AppendFirstMatchingComponentSummary(oAsm, msg, "DRIVE CORE", "DRIVE CORE")
+        AppendFirstMatchingComponentSummary(oAsm, msg, "CROSS DRIVE", "CROSS DRIVE")
+        AppendFirstMatchingComponentSummary(oAsm, msg, "DRIVE FRAME", "DRIVE FRAME")
+        AppendFirstMatchingComponentSummary(oAsm, msg, "STIFFENER", "STIFFENER")
+        AppendFirstMatchingComponentSummary(oAsm, msg, "CYLINDER MOUNT", "CYLINDER MOUNT")
+        AppendFirstMatchingComponentSummary(oAsm, msg, "CYLINDER MOUNT ASSY", "CYLINDER MOUNT ASSY")
+
+        MessageBox.Show(msg, "Drive Assembly Summary")
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Could not build the final part summary report." & vbCrLf & vbCrLf & _
+            "Error:" & vbCrLf & _
+            ex.Message, _
+            "Final Summary Report Error")
+
+    End Try
+
+End Sub
+
+
+'====================================================
+' APPEND FIRST MATCHING COMPONENT SUMMARY
+'
+' Searches the entire assembly tree for the first component
+' whose Title iProperty matches searchTitle.
+'
+' If found, adds its part number and description to the
+' final summary report.
+'
+' If not found, it does nothing.
+'====================================================
+Sub AppendFirstMatchingComponentSummary( _
+    oAsm As AssemblyDocument, _
+    ByRef msg As String, _
+    displayName As String, _
+    searchTitle As String)
+
+    Try
+
+        Dim foundDoc As Document = Nothing
+
+        foundDoc = FindFirstDocumentByTitle( _
+            oAsm.ComponentDefinition.Occurrences, _
+            searchTitle)
+
+        If foundDoc IsNot Nothing Then
+            msg &= BuildSummaryLine(displayName, foundDoc)
+            msg &= vbCrLf
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+'====================================================
+' BUILD SUMMARY LINE
+'
+' Returns:
+' COMPONENT NAME
+' Part Number: ####
+' Description: ####
+'====================================================
+Function BuildSummaryLine(displayName As String, oDoc As Document) As String
+
+    Dim msg As String = ""
+
+    msg &= displayName & vbCrLf
+    msg &= "Part Number: " & GetDocumentPartNumber(oDoc) & vbCrLf
+    msg &= "Description: " & GetDocumentDescription(oDoc) & vbCrLf
+
+    Return msg
+
+End Function
+
+
+'====================================================
+' COMPONENT EXISTS BY TITLE
+'
+' Used to prevent optional child rules from being called
+' when the matching component does not exist.
+'====================================================
+Function ComponentExistsByTitle( _
+    oAsm As AssemblyDocument, _
+    searchTitle As String) As Boolean
+
+    Try
+
+        Dim foundDoc As Document = FindFirstDocumentByTitle( _
+            oAsm.ComponentDefinition.Occurrences, _
+            searchTitle)
+
+        Return Not foundDoc Is Nothing
+
+    Catch
+        Return False
+    End Try
+
+End Function
+
+
+'====================================================
+' FIND FIRST DOCUMENT BY TITLE
+'
+' Recursively searches every level of the assembly tree.
+'
+' Returns the first document whose Title iProperty exactly
+' matches the requested title.
+'====================================================
+Function FindFirstDocumentByTitle( _
+    occs As ComponentOccurrences, _
+    searchTitle As String) As Document
+
+    For Each oOcc As ComponentOccurrence In occs
+
+        Try
+
+            If oOcc.Suppressed Then GoTo ContinueLoop
+            If IsSpecialOccurrence(oOcc) Then GoTo ContinueLoop
+
+            Dim thisTitle As String = UCase(Trim(GetOccurrenceTitle(oOcc)))
+
+            If thisTitle = UCase(Trim(searchTitle)) Then
+
+                Try
+                    Return oOcc.Definition.Document
+                Catch
+                End Try
+
+            End If
+
+            If oOcc.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+                If TypeOf oOcc.Definition Is AssemblyComponentDefinition Then
+
+                    Dim subDef As AssemblyComponentDefinition = _
+                        CType(oOcc.Definition, AssemblyComponentDefinition)
+
+                    Dim foundDoc As Document = FindFirstDocumentByTitle( _
+                        subDef.Occurrences, _
+                        searchTitle)
+
+                    If foundDoc IsNot Nothing Then
+                        Return foundDoc
+                    End If
+
+                End If
+
+            End If
+
+ContinueLoop:
+
+        Catch
+        End Try
+
+    Next
+
+    Return Nothing
+
+End Function
+
+
+'====================================================
+' RUN EXTERNAL RULE IN TARGET DRIVE ASSEMBLY
+'
+' This prevents rules from running in the original
+' template iLogic context after Save Copy As.
+'====================================================
+Function RunRuleInActiveDocument( _
+    oTargetAsm As AssemblyDocument, _
+    ruleName As String) As Boolean
+
+    Try
+
+        If oTargetAsm Is Nothing Then
+
+            MessageBox.Show( _
+                "Target assembly was Nothing." & vbCrLf & vbCrLf & _
+                "Rule: " & ruleName, _
+                "Rule Execution Stopped")
+
+            Return False
+
+        End If
+
+        Try
+            oTargetAsm.Activate()
+        Catch
+        End Try
+
+        Try
+            oTargetAsm.Update2(True)
+        Catch
+            Try
+                oTargetAsm.Update()
+            Catch
+            End Try
+        End Try
+
+        Dim iLogicAuto As Object = iLogicVb.Automation
+
+        iLogicAuto.RunExternalRule(oTargetAsm, ruleName)
+
+        Try
+            oTargetAsm.Update2(True)
+        Catch
+            Try
+                oTargetAsm.Update()
+            Catch
+            End Try
+        End Try
+
+        Return True
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Rule FAILED in target assembly:" & vbCrLf & vbCrLf & _
+            "Rule: " & ruleName & vbCrLf & vbCrLf & _
+            "Document: " & oTargetAsm.DisplayName & vbCrLf & _
+            "Full Path: " & oTargetAsm.FullFileName & vbCrLf & vbCrLf & _
+            "Error:" & vbCrLf & _
+            ex.Message, _
+            "Rule Execution Stopped")
+
+        Return False
+
+    End Try
+
+End Function
+
+
+'====================================================
+' RUN EXTERNAL RULE IN CHILD COMPONENTS BY TITLE
+'
+' Finds all occurrences anywhere in the assembly tree
+' whose Title iProperty matches one of the allowed titles.
+'
+' The external rule runs inside the matched child document,
+' not the top-level assembly.
+'
+' Missing components are skipped without a message.
+'
+' Only reports if a matching component is found and the
+' rule fails while running on that component.
+'====================================================
+Function RunRuleInComponentsByTitle( _
+    oAsm As AssemblyDocument, _
+    ruleName As String, _
+    allowedTitles() As String) As Boolean
+
+    Try
+
+        Dim iLogicAuto As Object = iLogicVb.Automation
+
+        Dim foundCount As Integer = 0
+        Dim processedDocs As New System.Collections.Generic.HashSet(Of String)
+
+        If Not RunRuleInComponentsByTitleRecursive( _
+            oAsm.ComponentDefinition.Occurrences, _
+            ruleName, _
+            allowedTitles, _
+            iLogicAuto, _
+            processedDocs, _
+            foundCount) Then
+
+            Return False
+
+        End If
+
+        Return True
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Rule execution failed:" & vbCrLf & vbCrLf & _
+            "Rule: " & ruleName & vbCrLf & vbCrLf & _
+            "Error:" & vbCrLf & _
+            ex.Message, _
+            "iLogic ERROR")
+
+        Return False
+
+    End Try
+
+End Function
+
+
+'====================================================
+' RECURSIVE COMPONENT SEARCH / RULE RUNNER
+'
+' Searches every level of the assembly.
+'
+' If a matching child document is found, the external
+' rule is run directly inside that child document.
+'
+' Uses processedDocs so the same physical document does
+' not get processed multiple times if it appears more than
+' once in the assembly.
+'
+' Only reports if something fails.
+'====================================================
+Function RunRuleInComponentsByTitleRecursive( _
+    occs As ComponentOccurrences, _
+    ruleName As String, _
+    allowedTitles() As String, _
+    iLogicAuto As Object, _
+    ByRef processedDocs As System.Collections.Generic.HashSet(Of String), _
+    ByRef foundCount As Integer) As Boolean
+
+    For Each oOcc As ComponentOccurrence In occs
+
+        Try
+
+            If oOcc.Suppressed Then GoTo ContinueLoop
+            If IsSpecialOccurrence(oOcc) Then GoTo ContinueLoop
+
+            If OccurrenceTitleIsAllowed(oOcc, allowedTitles) Then
+
+                Dim targetDoc As Document = Nothing
+
+                Try
+                    targetDoc = oOcc.Definition.Document
+                Catch
+                    targetDoc = Nothing
+                End Try
+
+                If targetDoc IsNot Nothing Then
+
+                    Dim docKey As String = GetDocumentKey(targetDoc)
+
+                    If Not processedDocs.Contains(docKey) Then
+
+                        processedDocs.Add(docKey)
+                        foundCount += 1
+
+                        Dim currentStep As String = ""
+
+                        Try
+
+                            currentStep = "Pre-Update"
+
+                            Try
+                                targetDoc.Update2(True)
+                            Catch
+                            End Try
+
+                            currentStep = "Rule Execution"
+
+                            iLogicAuto.RunExternalRule(targetDoc, ruleName)
+
+                            currentStep = "Post-Update"
+
+                            Try
+                                targetDoc.Update2(True)
+                            Catch exUpdate As Exception
+
+                                MessageBox.Show( _
+                                    "Post-update failed after child rule ran." & vbCrLf & vbCrLf & _
+                                    "Rule: " & ruleName & vbCrLf & _
+                                    "Occurrence: " & GetOccurrenceNameOnly(oOcc) & vbCrLf & _
+                                    "Document: " & GetOccurrenceDocumentDisplayName(oOcc) & vbCrLf & _
+                                    "Title: " & GetOccurrenceTitle(oOcc) & vbCrLf & _
+                                    "Full Path: " & GetDocumentFullPath(targetDoc) & vbCrLf & vbCrLf & _
+                                    "The rule already ran, but the child document failed to update afterward." & vbCrLf & vbCrLf & _
+                                    "Error:" & vbCrLf & _
+                                    exUpdate.Message, _
+                                    "Child Post-Update Error")
+
+                                Return False
+
+                            End Try
+
+                        Catch ex As Exception
+
+                            MessageBox.Show( _
+                                "Child rule failed." & vbCrLf & vbCrLf & _
+                                "Failed Step: " & currentStep & vbCrLf & vbCrLf & _
+                                "Rule: " & ruleName & vbCrLf & _
+                                "Occurrence: " & GetOccurrenceNameOnly(oOcc) & vbCrLf & _
+                                "Document: " & GetOccurrenceDocumentDisplayName(oOcc) & vbCrLf & _
+                                "Title: " & GetOccurrenceTitle(oOcc) & vbCrLf & _
+                                "Full Path: " & GetDocumentFullPath(targetDoc) & vbCrLf & vbCrLf & _
+                                "Error:" & vbCrLf & _
+                                ex.Message, _
+                                "Child Rule Error")
+
+                            Return False
+
+                        End Try
+
+                    End If
+
+                End If
+
+            End If
+
+            If oOcc.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+                If TypeOf oOcc.Definition Is AssemblyComponentDefinition Then
+
+                    Dim subDef As AssemblyComponentDefinition = _
+                        CType(oOcc.Definition, AssemblyComponentDefinition)
+
+                    If Not RunRuleInComponentsByTitleRecursive( _
+                        subDef.Occurrences, _
+                        ruleName, _
+                        allowedTitles, _
+                        iLogicAuto, _
+                        processedDocs, _
+                        foundCount) Then
+
+                        Return False
+
+                    End If
+
+                End If
+
+            End If
+
+ContinueLoop:
+
+        Catch ex As Exception
+
+            MessageBox.Show( _
+                "Failed while checking occurrence:" & vbCrLf & vbCrLf & _
+                "Occurrence: " & GetOccurrenceNameOnly(oOcc) & vbCrLf & _
+                "Document: " & GetOccurrenceDocumentDisplayName(oOcc) & vbCrLf & _
+                "Title: " & GetOccurrenceTitle(oOcc) & vbCrLf & vbCrLf & _
+                "Error:" & vbCrLf & _
+                ex.Message, _
+                "Component Search Error")
+
+            Return False
+
+        End Try
+
+    Next
+
+    Return True
+
+End Function
+
+
+'====================================================
+' CHECK IF OCCURRENCE TITLE MATCHES ALLOWED TITLE LIST
+'
+' Uses exact Title iProperty match.
+'====================================================
+Function OccurrenceTitleIsAllowed( _
+    oOcc As ComponentOccurrence, _
+    allowedTitles() As String) As Boolean
+
+    Dim compTitle As String = UCase(Trim(GetOccurrenceTitle(oOcc)))
+
+    If compTitle = "" Then Return False
+
+    For Each allowedTitle As String In allowedTitles
+
+        If compTitle = UCase(Trim(allowedTitle)) Then
+            Return True
+        End If
+
+    Next
+
+    Return False
+
+End Function
+
+
+'====================================================
+' GET UNIQUE DOCUMENT KEY
+'
+' FullFileName is preferred.
+' DisplayName is used as fallback for unsaved files.
+'====================================================
+Function GetDocumentKey(oDoc As Document) As String
+
+    Try
+        If Trim(oDoc.FullFileName) <> "" Then
+            Return UCase(Trim(oDoc.FullFileName))
+        End If
+    Catch
+    End Try
+
+    Try
+        Return UCase(Trim(oDoc.DisplayName))
+    Catch
+    End Try
+
+    Return System.Guid.NewGuid().ToString()
+
+End Function
+
+
+'====================================================
+' SKIP WELD BEADS / SPECIAL OCCURRENCES
+'
+' Prevents rule from trying to process Inventor weld bead
+' objects or other non-standard component references.
+'====================================================
+Function IsSpecialOccurrence(oOcc As ComponentOccurrence) As Boolean
+
+    Dim occName As String = ""
+    Dim docName As String = ""
+    Dim title As String = ""
+
+    Try
+        occName = UCase(Trim(oOcc.Name))
+    Catch
+    End Try
+
+    Try
+        docName = UCase(Trim(oOcc.Definition.Document.DisplayName))
+    Catch
+    End Try
+
+    Try
+        title = UCase(Trim(CStr(oOcc.Definition.Document.PropertySets.Item("Inventor Summary Information").Item("Title").Value)))
+    Catch
+    End Try
+
+    If InStr(occName, "WELDBEAD") > 0 Then Return True
+    If InStr(docName, "WELDBEAD") > 0 Then Return True
+    If InStr(title, "WELDBEAD") > 0 Then Return True
+
+    Return False
+
+End Function
+
+
+'====================================================
+' GET OCCURRENCE TITLE iPROPERTY
+'
+' Reads the child document Title iProperty.
+'====================================================
+Function GetOccurrenceTitle(oOcc As ComponentOccurrence) As String
+
+    Try
+        Return CStr(oOcc.Definition.Document.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET DOCUMENT TITLE iPROPERTY
+'====================================================
+Function GetDocumentTitle(oDoc As Document) As String
+
+    Try
+        Return CStr(oDoc.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET DOCUMENT PART NUMBER iPROPERTY
+'====================================================
+Function GetDocumentPartNumber(oDoc As Document) As String
+
+    Try
+        Return CStr(oDoc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET DOCUMENT DESCRIPTION iPROPERTY
+'====================================================
+Function GetDocumentDescription(oDoc As Document) As String
+
+    Try
+        Return CStr(oDoc.PropertySets.Item("Design Tracking Properties").Item("Description").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET OCCURRENCE NAME
+'====================================================
+Function GetOccurrenceNameOnly(oOcc As ComponentOccurrence) As String
+
+    Try
+        Return CStr(oOcc.Name)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET OCCURRENCE DOCUMENT DISPLAY NAME
+'====================================================
+Function GetOccurrenceDocumentDisplayName(oOcc As ComponentOccurrence) As String
+
+    Try
+        Return CStr(oOcc.Definition.Document.DisplayName)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET DOCUMENT FULL PATH
+'
+' Used only in failure messages.
+'====================================================
+Function GetDocumentFullPath(oDoc As Document) As String
+
+    Try
+        If Trim(oDoc.FullFileName) <> "" Then
+            Return CStr(oDoc.FullFileName)
+        End If
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+'====================================================
+' REBIND TO NEW DRIVE ASSEMBLY
+'
+' Gets the new drive assembly path from the Search /
+' Replace rule and resets oAsm so the rest of this
+' configurator runs in the new assembly, not the source
+' template assembly.
+'====================================================
+Function RebindToNewDriveAssembly(ByRef oAsm As AssemblyDocument) As Boolean
+
+    Try
+
+        Dim newDrivePath As String = ""
+
+        Try
+            If SharedVariable.Exists("DriveConfig_NewDriveAssyPath") Then
+                newDrivePath = Trim(CStr(SharedVariable("DriveConfig_NewDriveAssyPath")))
+            End If
+        Catch
+            newDrivePath = ""
+        End Try
+
+        If Trim(newDrivePath) = "" Then
+
+            MessageBox.Show( _
+                "The new drive assembly path was not found." & vbCrLf & vbCrLf & _
+                "The configurator stopped so the remaining rules do not run in the template assembly.", _
+                "New Drive Assembly Path Missing")
+
+            Return False
+
+        End If
+
+        If Not System.IO.File.Exists(newDrivePath) Then
+
+            MessageBox.Show( _
+                "The new drive assembly file does not exist:" & vbCrLf & vbCrLf & _
+                newDrivePath, _
+                "New Drive Assembly Missing")
+
+            Return False
+
+        End If
+
+        Dim newDoc As Document = Nothing
+
+        'Find the new file if it is already open.
+        For Each openDoc As Document In ThisApplication.Documents
+
+            Try
+
+                If UCase(Trim(openDoc.FullFileName)) = UCase(Trim(newDrivePath)) Then
+                    newDoc = openDoc
+                    Exit For
+                End If
+
+            Catch
+            End Try
+
+        Next
+
+        'If not open, open it.
+        If newDoc Is Nothing Then
+            newDoc = ThisApplication.Documents.Open(newDrivePath, True)
+        End If
+
+        If newDoc Is Nothing Then
+
+            MessageBox.Show( _
+                "Inventor could not open the new drive assembly:" & vbCrLf & vbCrLf & _
+                newDrivePath, _
+                "Open New Drive Assembly Failed")
+
+            Return False
+
+        End If
+
+        If newDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            MessageBox.Show( _
+                "The new file is not an assembly:" & vbCrLf & vbCrLf & _
+                newDrivePath, _
+                "Invalid New Drive Assembly")
+
+            Return False
+
+        End If
+
+        oAsm = CType(newDoc, AssemblyDocument)
+
+        Try
+            oAsm.Activate()
+        Catch
+        End Try
+
+        Try
+            oAsm.Update2(True)
+        Catch
+            Try
+                oAsm.Update()
+            Catch
+            End Try
+        End Try
+
+        Return True
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Failed to switch configurator to the new drive assembly." & vbCrLf & vbCrLf & _
+            "Error:" & vbCrLf & _
+            ex.Message, _
+            "Rebind Failed")
+
+        Return False
+
+    End Try
+
+End Function

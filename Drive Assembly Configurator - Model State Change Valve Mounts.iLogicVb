@@ -1,0 +1,149 @@
+﻿Sub Main()
+
+    Const PHANTOM_TITLE As String = "PHANTOM VALVE MOUNTS"
+    Const RUN_GUARD As String = "Phantom_Valve_Mounts_Model_State_Rule_Running"
+
+    If SharedVariable.Exists(RUN_GUARD) Then Exit Sub
+
+    SharedVariable(RUN_GUARD) = True
+
+    Try
+
+        Dim phantomOccName As String = ""
+        Dim targetState As String = ""
+
+        '--------------------------------------------
+        ' Determine target model state from Drive_Frame_Gap
+        '--------------------------------------------
+        Dim DriveFrameGap As Double = CDbl(Parameter("Drive_Frame_Gap"))
+
+        If Math.Abs(DriveFrameGap - 55) < 0.001 Then
+
+            targetState = "55 inch Drive Gap"
+
+        ElseIf Math.Abs(DriveFrameGap - 57) < 0.001 Then
+
+            targetState = "57 inch Drive Gap"
+
+        Else
+
+            Exit Sub
+
+        End If
+
+        Dim oTopDoc As AssemblyDocument = CType(ThisDoc.Document, AssemblyDocument)
+        Dim oTopDef As AssemblyComponentDefinition = oTopDoc.ComponentDefinition
+
+        '--------------------------------------------
+        ' Find PHANTOM VALVE MOUNTS by Title iProperty
+        ' TOP LEVEL ONLY
+        '--------------------------------------------
+        For Each occ As ComponentOccurrence In oTopDef.Occurrences
+
+            Try
+
+                If UCase(Trim(GetTitle(occ))) = PHANTOM_TITLE Then
+
+                    phantomOccName = occ.Name
+                    Exit For
+
+                End If
+
+            Catch
+            End Try
+
+        Next
+
+        '--------------------------------------------
+        ' PHANTOM VALVE MOUNTS NOT FOUND
+        '--------------------------------------------
+        If phantomOccName = "" Then
+
+            MessageBox.Show( _
+                "Find Phantom Valve Mounts was not found." & vbCrLf & vbCrLf & _
+                "Title searched for:" & vbCrLf & _
+                PHANTOM_TITLE, _
+                "Phantom Valve Mounts Not Found")
+
+            Exit Sub
+
+        End If
+
+        '--------------------------------------------
+        ' Read current model state
+        '--------------------------------------------
+        Dim currentState As String = ""
+
+        Try
+
+            currentState = Component.ActiveModelState(phantomOccName)
+
+        Catch ex As Exception
+
+            MessageBox.Show( _
+                "Phantom Valve Mounts occurrence found:" & vbCrLf & _
+                phantomOccName & vbCrLf & vbCrLf & _
+                "Active model state could not be read." & vbCrLf & vbCrLf & _
+                ex.Message, _
+                "Model State Read Error")
+
+            Exit Sub
+
+        End Try
+
+        '--------------------------------------------
+        ' Already correct - NO MESSAGE
+        '--------------------------------------------
+        If UCase(Trim(currentState)) = UCase(Trim(targetState)) Then
+            Exit Sub
+        End If
+
+        '--------------------------------------------
+        ' Change model state
+        '--------------------------------------------
+        Try
+
+            Component.ActiveModelState(phantomOccName) = targetState
+
+            InventorVb.DocumentUpdate()
+
+        Catch ex As Exception
+
+            MessageBox.Show( _
+                "Phantom Valve Mounts occurrence found:" & vbCrLf & _
+                phantomOccName & vbCrLf & vbCrLf & _
+                "Model state '" & targetState & _
+                "' could not be applied." & vbCrLf & vbCrLf & _
+                ex.Message, _
+                "Model State Error")
+
+        End Try
+
+    Finally
+
+        If SharedVariable.Exists(RUN_GUARD) Then
+            SharedVariable.Remove(RUN_GUARD)
+        End If
+
+    End Try
+
+End Sub
+
+
+Private Function GetTitle( _
+    ByVal occ As ComponentOccurrence) As String
+
+    Try
+
+        Return CStr( _
+            occ.Definition.Document.PropertySets( _
+            "Inventor Summary Information") _
+            .Item("Title").Value)
+
+    Catch
+
+        Return ""
+
+    End Try
+
+End Function

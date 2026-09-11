@@ -1,0 +1,1067 @@
+﻿'==================================================
+' DRIVE ASSEMBLY CONFIGURATOR
+' GENERATE DESCRIPTIONS
+'==================================================
+'
+' Responsibilities:
+'   1. Generate dynamic descriptions from current parameters.
+'   2. If Search Rule found a Vault file, use that file's Description.
+'   3. Store final display descriptions in DriveConfig_DESC_*.
+'   4. In normal mode, write descriptions to the parent assembly and matching components.
+'
+' Preview mode:
+'   DriveConfig_DescriptionPreviewOnly = True
+'
+' SharedVariable inputs from Search Rule:
+'   DriveConfig_PN_*
+'   DriveConfig_FILE_*
+'
+' SharedVariable outputs owned by this rule:
+'   DriveConfig_DESC_*
+'
+'==================================================
+
+
+Sub Main()
+
+    '==================================================
+    ' VALIDATE DOCUMENT
+    '==================================================
+
+    Dim oRawDoc As Document = Nothing
+
+    Try
+        oRawDoc = ThisDoc.Document
+    Catch
+        oRawDoc = Nothing
+    End Try
+
+    If oRawDoc Is Nothing Then
+
+        Try
+            oRawDoc = ThisApplication.ActiveDocument
+        Catch
+            oRawDoc = Nothing
+        End Try
+
+    End If
+
+    If oRawDoc Is Nothing Then
+        MessageBox.Show("No active document found.", "Generate Descriptions")
+        Exit Sub
+    End If
+
+    If oRawDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MessageBox.Show("Run this rule in a top-level drive assembly.", "Generate Descriptions")
+        Exit Sub
+    End If
+
+    Dim oParentAsm As AssemblyDocument = CType(oRawDoc, AssemblyDocument)
+    Dim oParams As Parameters = oParentAsm.ComponentDefinition.Parameters
+
+    '==================================================
+    ' ALWAYS BUILD PREVIEW VALUES
+    '==================================================
+    ' This populates DriveConfig_DESC_* for the form.
+    '
+    ' Existing Vault files:
+    '   GetBestDescription() uses the found Vault file
+    '   description when DriveConfig_FILE_* exists.
+    '
+    ' New files:
+    '   GetBestDescription() uses generated description.
+    '==================================================
+
+    ClearDescriptionSharedVariables()
+
+    StoreAllDescriptionPreviewValues(oParams)
+
+    '==================================================
+    ' WRITE MODE
+    '==================================================
+    ' Only write when explicitly requested.
+    '
+    ' This only writes to:
+    '   1. The new DRIVE ASSY
+    '   2. Files listed in DriveConfig_CreatedChildFiles
+    '
+    ' It does NOT write to existing Vault files.
+    '==================================================
+
+    If GetSharedBool("DriveConfig_DescriptionWriteMode", False) = False Then
+        Exit Sub
+    End If
+
+    Try
+
+        WriteCreatedDescriptionsOnly(oParentAsm, oParams)
+
+    Finally
+
+        Try
+            SharedVariable("DriveConfig_DescriptionWriteMode") = False
+        Catch
+        End Try
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' STORE ALL DESCRIPTION PREVIEW VALUES
+'==================================================
+Sub StoreAllDescriptionPreviewValues(ByVal oParams As Parameters)
+
+    StoreDescriptionText("DRIVE ASSEMBLY", GetBestDescription("DRIVE ASSEMBLY", BuildDriveAssemblyDescription(oParams)))
+    StoreDescriptionText("CROSSMEMBER", GetBestDescription("CROSSMEMBER", BuildCrossmemberDescription(oParams)))
+    StoreDescriptionText("DRIVE FRAME", GetBestDescription("DRIVE FRAME", BuildDriveFrameDescription(oParams)))
+    StoreDescriptionText("STIFFENER", GetBestDescription("STIFFENER", BuildStiffenerDescription(oParams)))
+    StoreDescriptionText("CYLINDER MOUNT", GetBestDescription("CYLINDER MOUNT", BuildCylinderMountDescription(oParams)))
+    StoreDescriptionText("CYLINDER MOUNT ASSEMBLY", GetBestDescription("CYLINDER MOUNT ASSEMBLY", BuildCylinderMountAssemblyDescription(oParams)))
+
+    StoreDescriptionText("DRIVE CORE", GetBestDescription("DRIVE CORE", ""))
+    StoreDescriptionText("CROSS DRIVE SET", GetBestDescription("CROSS DRIVE SET", ""))
+    StoreDescriptionText("UPPER CROSS DRIVE SUPPORT", GetBestDescription("UPPER CROSS DRIVE SUPPORT", ""))
+    StoreDescriptionText("SERIAL PLATE", GetBestDescription("SERIAL PLATE", ""))
+
+End Sub
+
+
+'==================================================
+' GET BEST DESCRIPTION
+'==================================================
+' Priority:
+'   1. If Search Rule found an existing file, use file Description.
+'   2. Otherwise use generated description.
+'==================================================
+Function GetBestDescription( _
+    ByVal componentName As String, _
+    ByVal generatedDescription As String) As String
+
+    Dim existingDescription As String = GetFoundFileDescription(componentName)
+
+    If Trim(existingDescription) <> "" Then
+        Return existingDescription
+    End If
+
+    Return generatedDescription
+
+End Function
+
+
+'==================================================
+' GET FOUND FILE DESCRIPTION
+'==================================================
+' Priority:
+'
+'   1. Use description already stored by Search Rule:
+'        DriveConfig_FOUND_DESC_*
+'
+'   2. If that is blank, try reading from:
+'        DriveConfig_FILE_*
+'
+' Important:
+'   Running this rule manually by itself will not have
+'   DriveConfig_PN_* or DriveConfig_FILE_* unless the
+'   search rule already ran.
+'==================================================
+
+Function GetFoundFileDescription(ByVal componentName As String) As String
+
+    Try
+
+        Dim key As String = GetDescriptionComponentKey(componentName)
+
+        If Trim(key) = "" Then Return ""
+
+        Dim pn As String = GetSharedText("DriveConfig_PN_" & key)
+
+        If Trim(pn) = "" Then Return ""
+        If UCase(Trim(pn)) = "NOT PLACED" Then Return ""
+
+        '--------------------------------------------------
+        ' Best option:
+        ' The Search Rule already read and stored the
+        ' existing Vault file description.
+        '--------------------------------------------------
+
+        Dim cachedDesc As String = GetSharedText("DriveConfig_FOUND_DESC_" & key)
+
+        If Trim(cachedDesc) <> "" Then
+            Return cachedDesc
+        End If
+
+        '--------------------------------------------------
+        ' Fallback:
+        ' Try to read the description from the found file.
+        ' This is less ideal because it opens the document.
+        '--------------------------------------------------
+
+        Dim filePath As String = GetSharedText("DriveConfig_FILE_" & key)
+
+        If Trim(filePath) = "" Then Return ""
+
+        Return GetDescriptionFromFile(filePath)
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+
+
+
+
+
+
+
+
+
+
+
+'==================================================
+' CLEAR DESCRIPTION SHARED VARIABLES
+'==================================================
+Sub ClearDescriptionSharedVariables()
+
+    Try
+
+        Dim keys() As String = New String() { _
+            "DRIVE_ASSEMBLY", _
+            "CROSSMEMBER", _
+            "DRIVE_FRAME", _
+            "DRIVE_CORE", _
+            "CROSS_DRIVE_SET", _
+            "UPPER_CROSS_DRIVE_SUPPORT", _
+            "SERIAL_PLATE", _
+            "CYLINDER_MOUNT", _
+            "CYLINDER_MOUNT_ASSEMBLY", _
+            "STIFFENER" _
+        }
+
+        For Each key As String In keys
+            SharedVariable("DriveConfig_DESC_" & key) = ""
+        Next
+
+    Catch
+    End Try
+
+End Sub
+
+
+'==================================================
+' STORE DESCRIPTION TEXT
+'==================================================
+Sub StoreDescriptionText( _
+    ByVal componentName As String, _
+    ByVal desc As String)
+
+    Try
+
+        Dim key As String = GetDescriptionComponentKey(componentName)
+
+        If Trim(key) = "" Then Exit Sub
+
+        SharedVariable("DriveConfig_DESC_" & key) = Trim(desc)
+
+    Catch
+    End Try
+
+End Sub
+
+
+'==================================================
+' COMPONENT KEY
+'==================================================
+Function GetDescriptionComponentKey(ByVal componentName As String) As String
+
+    Dim key As String = UCase(Trim(componentName))
+
+    If key = "DRIVE ASSEMBLY" Then Return "DRIVE_ASSEMBLY"
+    If key = "CROSSMEMBER" Then Return "CROSSMEMBER"
+    If key = "DRIVE FRAME" Then Return "DRIVE_FRAME"
+    If key = "DRIVE CORE" Then Return "DRIVE_CORE"
+    If key = "CROSS DRIVE SET" Then Return "CROSS_DRIVE_SET"
+    If key = "UPPER CROSS DRIVE SUPPORT" Then Return "UPPER_CROSS_DRIVE_SUPPORT"
+    If key = "SERIAL PLATE" Then Return "SERIAL_PLATE"
+    If key = "CYLINDER MOUNT" Then Return "CYLINDER_MOUNT"
+    If key = "CYLINDER MOUNT ASSEMBLY" Then Return "CYLINDER_MOUNT_ASSEMBLY"
+    If key = "STIFFENER" Then Return "STIFFENER"
+
+    Return ""
+
+End Function
+
+
+'==================================================
+' DRIVE ASSEMBLY DESCRIPTION
+'==================================================
+Function BuildDriveAssemblyDescription(ByVal oParams As Parameters) As String
+
+    Dim systemText As String = T(oParams, "System", "RX3")
+    Dim driveType As String = T(oParams, "Drive_Type", "")
+    Dim driveTypeText As String = ""
+
+    If Trim(driveType) <> "" Then
+        driveTypeText = driveType & ", "
+    End If
+
+    Dim shoeText As String = T(oParams, "Shoe_Style", "")
+    Dim shoeAbbrev As String = GetShoeAbbreviation(shoeText)
+
+    Dim desc As String = _
+        "DRIVE ASSY, " & _
+        systemText & ", " & _
+        driveTypeText & _
+        P(oParams, "Bore_Size") & " x " & _
+        P(oParams, "Stroke_Length") & ", " & _
+        P(oParams, "CC") & " CC, " & _
+        P(oParams, "SC") & " SC, " & _
+        V(oParams, "Quantity_of_Shoes", 0) & " " & _
+        shoeAbbrev & ", " & _
+        T(oParams, "Drive_Frame_Style", "") & " " & _
+        P(oParams, "Outside_Dimension") & " OUT " & _
+        P(oParams, "Inside_Dimension") & " INS, " & _
+        T(oParams, "Crossmember_Material", "") & " XMEM " & _
+        P(oParams, "Crossmember_Height") & " x " & _
+        P(oParams, "Crossmember_Width")
+
+    Return FormatDescriptionText(desc)
+
+End Function
+
+
+'==================================================
+' CROSSMEMBER DESCRIPTION
+'==================================================
+Function BuildCrossmemberDescription(ByVal oParams As Parameters) As String
+
+    Dim desc As String = _
+        "CROSSMEMBER, " & _
+        T(oParams, "Crossmember_Material", "") & ", " & _
+        GetComponentCC(oParams, "CROSSMEMBER") & " CC, " & _
+        P(oParams, "Crossmember_Height") & " x " & _
+        P(oParams, "Crossmember_Width")
+
+    Return FormatDescriptionText(desc)
+
+End Function
+
+
+'==================================================
+' DRIVE FRAME DESCRIPTION
+'==================================================
+Function BuildDriveFrameDescription(ByVal oParams As Parameters) As String
+
+    Dim desc As String = _
+        "DRIVE FRAME, " & _
+        T(oParams, "Drive_Frame_Style", "") & ", " & _
+        P(oParams, "Drive_Frame_Gap") & " GAP, " & _
+        GetComponentCC(oParams, "DRIVE FRAME") & " CC " & _
+        P(oParams, "Outside_Dimension") & " OUT, " & _
+        P(oParams, "Inside_Dimension") & " INS"
+
+    Return FormatDescriptionText(desc)
+
+End Function
+
+
+'==================================================
+' STIFFENER DESCRIPTION
+'==================================================
+Function BuildStiffenerDescription(ByVal oParams As Parameters) As String
+
+    Dim desc As String = _
+        "STIFFENER, " & _
+        T(oParams, "Drive_Frame_Style", "") & ", " & _
+		GetComponentCC(oParams, "STIFFENER") & " CC, " & _
+        P(oParams, "Outside_Dimension") & " OUT, " & _
+        P(oParams, "Inside_Dimension") & " INS"
+
+    Return FormatDescriptionText(desc)
+
+End Function
+
+
+'==================================================
+' CYLINDER MOUNT DESCRIPTION
+'==================================================
+Function BuildCylinderMountDescription(ByVal oParams As Parameters) As String
+
+    Dim driveFrameStyle As String = UCase(Trim(T(oParams, "Drive_Frame_Style", "")))
+    Dim desc As String = ""
+
+Select Case driveFrameStyle
+
+    Case "ALUMINUM TOP MOUNT"
+
+        desc = _
+            "CYLINDER MOUNT EXTR2301, " & _
+            GetComponentCC(oParams, "CYLINDER MOUNT") & " CC, " & _
+            P(oParams, "Outside_Dimension") & " OUT, " & _
+            P(oParams, "Inside_Dimension") & " INS"
+
+    Case "STEEL TOP MOUNT"
+
+        desc = _
+            "CYLINDER MOUNT, " & _
+            GetComponentCC(oParams, "CYLINDER MOUNT") & " CC, " & _
+            P(oParams, "Outside_Dimension") & " OUT, " & _
+            P(oParams, "Inside_Dimension") & " INS"
+
+    Case "STEEL IN RAILS"
+
+        desc = _
+            "CYLINDER MOUNT, STL IN RAILS, " & _
+            GetComponentCC(oParams, "CYLINDER MOUNT") & " CC, " & _
+            P(oParams, "Outside_Dimension") & " OUT, " & _
+            P(oParams, "Inside_Dimension") & " INS"
+
+    Case "OUTSIDE PERIMETER", _
+         "OUTSIDE PERIMETER (OSP)", _
+         "OSP"
+
+        desc = _
+            "CYLINDER MOUNT FORMED, OSP, " & _
+            P(oParams, "Crossmember_Width") & " WIDE"
+
+    Case Else
+
+        desc = _
+            "CYLINDER MOUNT, " & _
+            GetComponentCC(oParams, "CYLINDER MOUNT") & " CC, " & _
+            P(oParams, "Outside_Dimension") & " OUT, " & _
+            P(oParams, "Inside_Dimension") & " INS"
+
+End Select
+
+    Return FormatDescriptionText(desc)
+
+End Function
+
+
+Function BuildCylinderMountAssemblyDescription(ByVal oParams As Parameters) As String
+
+    Dim desc As String = _
+        "CYLINDER MOUNT ASSY, " & _
+        GetComponentCC(oParams, "CYLINDER MOUNT ASSEMBLY") & " CC, " & _
+        P(oParams, "Outside_Dimension") & " OUT, " & _
+        P(oParams, "Inside_Dimension") & " INS"
+
+    Return FormatDescriptionText(desc)
+
+End Function
+
+
+'==================================================
+' WRITE CREATED DESCRIPTIONS ONLY
+'==================================================
+' Writes descriptions only to files created during this
+' configurator run.
+'
+' Does NOT recursively walk the assembly.
+' Does NOT write to existing Vault files.
+'==================================================
+Sub WriteCreatedDescriptionsOnly( _
+    ByVal oParentAsm As AssemblyDocument, _
+    ByVal oParams As Parameters)
+
+    Dim updatedCount As Integer = 0
+    Dim report As String = ""
+
+    '==================================================
+    ' WRITE NEW DRIVE ASSY DESCRIPTION
+    '==================================================
+    ' Prefer DriveConfig_NewDriveAssyPath if it exists.
+    ' Otherwise use the active parent assembly passed in.
+    '==================================================
+
+    Try
+
+        Dim driveAssyFile As String = GetSharedText("DriveConfig_NewDriveAssyPath")
+        Dim driveDoc As Document = Nothing
+        Dim openedHere As Boolean = False
+
+		If Trim(driveAssyFile) <> "" AndAlso System.IO.File.Exists(driveAssyFile) Then
+		
+		    driveDoc = GetOpenDocumentByFullFileName(driveAssyFile)
+		
+		    If driveDoc Is Nothing Then
+		        driveDoc = ThisApplication.Documents.Open(driveAssyFile, False)
+		        openedHere = True
+		    End If
+		
+		Else
+		
+		    report &= "SKIPPED: DRIVE ASSEMBLY | No created drive assembly path found in DriveConfig_NewDriveAssyPath" & vbCrLf & vbCrLf
+		    driveDoc = Nothing
+		
+		End If
+
+        If Not driveDoc Is Nothing Then
+
+            Dim driveDesc As String = BuildDriveAssemblyDescription(oParams)
+
+            If Trim(driveDesc) <> "" Then
+
+                WriteDescription(driveDoc, driveDesc)
+
+                updatedCount += 1
+
+                report &= "UPDATED: " & driveDoc.DisplayName & " | DRIVE ASSEMBLY" & vbCrLf
+                report &= "         " & driveDesc & vbCrLf & vbCrLf
+
+            End If
+
+        End If
+
+        Try
+            If openedHere AndAlso Not driveDoc Is Nothing Then
+                driveDoc.Close(True)
+            End If
+        Catch
+        End Try
+
+    Catch ex As Exception
+
+        report &= "FAILED WRITE: DRIVE ASSEMBLY" & vbCrLf
+        report &= "             " & ex.Message & vbCrLf & vbCrLf
+
+    End Try
+
+    '==================================================
+    ' WRITE CREATED CHILD FILE DESCRIPTIONS
+    '==================================================
+
+    Dim createdFiles As System.Collections.Generic.List(Of String) = GetCreatedChildFileList()
+
+    For Each filePath As String In createdFiles
+
+        WriteDescriptionToCreatedFile( _
+            filePath, _
+            oParams, _
+            updatedCount, _
+            report)
+
+    Next
+
+    If report = "" Then
+        report = "No created files needed description updates."
+    End If
+
+    MessageBox.Show( _
+        "Updated Created File Descriptions: " & updatedCount & _
+        vbCrLf & vbCrLf & _
+        report, _
+        "Drive Assembly Description Results")
+
+End Sub
+
+
+'==================================================
+' WRITE DESCRIPTION TO CREATED FILE
+'==================================================
+' Writes a generated description only to a file that was
+' created during this configurator run.
+'==================================================
+Sub WriteDescriptionToCreatedFile( _
+    ByVal filePath As String, _
+    ByVal oParams As Parameters, _
+    ByRef updatedCount As Integer, _
+    ByRef report As String)
+
+    Dim oDoc As Document = Nothing
+    Dim openedHere As Boolean = False
+
+    Try
+
+        If Trim(filePath) = "" Then Exit Sub
+        If Not System.IO.File.Exists(filePath) Then Exit Sub
+
+        oDoc = GetOpenDocumentByFullFileName(filePath)
+
+        If oDoc Is Nothing Then
+            oDoc = ThisApplication.Documents.Open(filePath, False)
+            openedHere = True
+        End If
+
+        If oDoc Is Nothing Then Exit Sub
+
+        Dim title As String = NormalizeTitle(GetDocumentTitle(oDoc))
+        Dim desc As String = BuildGeneratedDescriptionByTitle(title, oParams)
+
+        If Trim(desc) = "" Then
+            report &= "SKIPPED: " & System.IO.Path.GetFileName(filePath) & _
+                      " | No description rule for title [" & title & "]" & vbCrLf & vbCrLf
+            Exit Sub
+        End If
+
+        WriteDescription(oDoc, desc)
+
+        updatedCount += 1
+
+        report &= "UPDATED: " & System.IO.Path.GetFileName(filePath) & " | " & title & vbCrLf
+        report &= "         " & desc & vbCrLf & vbCrLf
+
+    Catch ex As Exception
+
+        report &= "FAILED WRITE: " & filePath & vbCrLf
+        report &= "             " & ex.Message & vbCrLf & vbCrLf
+
+    Finally
+
+        Try
+            If openedHere AndAlso Not oDoc Is Nothing Then
+                oDoc.Close(True)
+            End If
+        Catch
+        End Try
+
+    End Try
+
+End Sub
+
+
+
+'==================================================
+' PARAMETER HELPERS
+'==================================================
+Function P( _
+    ByVal oParams As Parameters, _
+    ByVal paramName As String) As String
+
+    Return GetParamExpressionText(oParams, paramName)
+
+End Function
+
+
+Function T( _
+    ByVal oParams As Parameters, _
+    ByVal paramName As String, _
+    ByVal defaultValue As String) As String
+
+    Try
+        Return CStr(oParams.Item(paramName).Value)
+    Catch
+        Return defaultValue
+    End Try
+
+End Function
+
+
+Function V( _
+    ByVal oParams As Parameters, _
+    ByVal paramName As String, _
+    ByVal defaultValue As Object) As String
+
+    Try
+
+        Dim valueText As String = CStr(oParams.Item(paramName).Value)
+
+        valueText = UCase(valueText)
+        valueText = Replace(valueText, "UL", "")
+        valueText = Replace(valueText, "IN", "")
+        valueText = Replace(valueText, "MM", "")
+        valueText = Trim(valueText)
+
+        Return valueText
+
+    Catch
+        Return CStr(defaultValue)
+    End Try
+
+End Function
+
+
+Function GetParamExpressionText( _
+    ByVal oParams As Parameters, _
+    ByVal paramName As String) As String
+
+    Try
+
+        Dim textValue As String = oParams.Item(paramName).Expression
+
+        textValue = CleanUnitText(textValue)
+
+        Return textValue
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function CleanUnitText(ByVal textValue As String) As String
+
+    Try
+
+        textValue = Trim(textValue)
+
+        textValue = Replace(textValue, " mm", "mm")
+        textValue = Replace(textValue, " in", "in")
+        textValue = Replace(textValue, " cm", "cm")
+        textValue = Replace(textValue, " m", "m")
+
+        Return textValue
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'==================================================
+' TEXT FORMAT HELPERS
+'==================================================
+Function GetShoeAbbreviation(ByVal shoeText As String) As String
+
+    Try
+
+        Dim s As String = Trim(shoeText)
+
+        If s = "" Then Return ""
+
+        If InStr(s, "(") > 0 And InStr(s, ")") > 0 Then
+            Return s.Substring(s.LastIndexOf("(") + 1).Replace(")", "")
+        End If
+
+        Return s
+
+    Catch
+        Return shoeText
+    End Try
+
+End Function
+
+
+Function FormatDescriptionText(ByVal desc As String) As String
+
+    Dim s As String = Trim(desc)
+
+    s = UCase(s)
+
+    s = Replace(s, "ALUMINUM", "AL")
+    s = Replace(s, "STEEL", "STL")
+    s = Replace(s, "GALVANIZED", "GALV")
+
+    s = Replace(s, " X ", " x ")
+
+    s = System.Text.RegularExpressions.Regex.Replace(s, "(\d+(?:\.\d+)?)IN\b", "$1in")
+    s = System.Text.RegularExpressions.Regex.Replace(s, "(\d+(?:\.\d+)?)MM\b", "$1mm")
+    s = System.Text.RegularExpressions.Regex.Replace(s, "(\d+(?:\.\d+)?)CM\b", "$1cm")
+    s = System.Text.RegularExpressions.Regex.Replace(s, "(\d+(?:\.\d+)?)M\b", "$1m")
+
+    Return s
+
+End Function
+
+
+'==================================================
+' FILE DESCRIPTION FROM FOUND VAULT FILE
+'==================================================
+' Safely reads Design Tracking Description.
+'
+' If the file is already open, it uses the open document.
+' If this function opens the document, it closes it after.
+'==================================================
+
+Function GetDescriptionFromFile(ByVal filePath As String) As String
+
+    Dim oDoc As Document = Nothing
+    Dim openedHere As Boolean = False
+
+    Try
+
+        If Trim(filePath) = "" Then Return ""
+        If Not System.IO.File.Exists(filePath) Then Return ""
+
+        oDoc = GetOpenDocumentByFullFileName(filePath)
+
+        If oDoc Is Nothing Then
+            oDoc = ThisApplication.Documents.Open(filePath, False)
+            openedHere = True
+        End If
+
+        Return GetDocumentDescription(oDoc)
+
+    Catch
+
+        Return ""
+
+    Finally
+
+        Try
+            If openedHere AndAlso Not oDoc Is Nothing Then
+                oDoc.Close(False)
+            End If
+        Catch
+        End Try
+
+    End Try
+
+End Function
+
+
+
+'==================================================
+' GET OPEN DOCUMENT BY FULL FILE NAME
+'==================================================
+' Prevents reopening a document that Inventor already has open.
+'==================================================
+
+Function GetOpenDocumentByFullFileName(ByVal filePath As String) As Document
+
+    Try
+
+        Dim targetPath As String = LCase(Trim(filePath))
+
+        For Each d As Document In ThisApplication.Documents
+
+            Try
+
+                If LCase(Trim(d.FullFileName)) = targetPath Then
+                    Return d
+                End If
+
+            Catch
+            End Try
+
+        Next
+
+    Catch
+    End Try
+
+    Return Nothing
+
+End Function
+
+
+
+Function GetDocumentDescription(ByVal oDoc As Document) As String
+
+    Try
+
+        If oDoc Is Nothing Then Return ""
+
+        Return Trim(CStr(oDoc.PropertySets.Item("Design Tracking Properties").Item("Description").Value))
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'==================================================
+' DOCUMENT TITLE HELPERS
+'==================================================
+Function GetDocumentTitle(ByVal oDoc As Document) As String
+
+    Try
+        Return CStr(oDoc.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function NormalizeTitle(ByVal rawTitle As String) As String
+
+    Dim title As String = UCase(Trim(rawTitle))
+
+    title = Replace(title, "&", "/")
+
+    Do While InStr(title, "  ") > 0
+        title = Replace(title, "  ", " ")
+    Loop
+
+    Return title
+
+End Function
+
+
+'==================================================
+' SHARED VARIABLE HELPERS
+'==================================================
+Function GetSharedText(ByVal sharedName As String) As String
+
+    Try
+
+        If SharedVariable.Exists(sharedName) Then
+            Return CStr(SharedVariable(sharedName))
+        End If
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+Function GetSharedBool( _
+    ByVal sharedName As String, _
+    ByVal defaultValue As Boolean) As Boolean
+
+    Try
+
+        If SharedVariable.Exists(sharedName) Then
+            Return CBool(SharedVariable(sharedName))
+        End If
+
+    Catch
+    End Try
+
+    Return defaultValue
+
+End Function
+
+
+'==================================================
+' WRITE DESCRIPTION IPROPERTY
+'==================================================
+' This should only be called for newly created files.
+' Existing Vault files should never be passed here.
+'==================================================
+Sub WriteDescription( _
+    ByVal oDoc As Document, _
+    ByVal desc As String)
+
+    If oDoc Is Nothing Then Exit Sub
+    If Trim(desc) = "" Then Exit Sub
+
+    Try
+        oDoc.PropertySets.Item("Design Tracking Properties").Item("Description").Value = desc
+    Catch ex As Exception
+        Throw New Exception("Could not write Description iProperty." & vbCrLf & ex.Message)
+    End Try
+
+    Try
+        oDoc.Update()
+    Catch
+    End Try
+
+    Try
+        If oDoc.Dirty Then
+            oDoc.Save2(True)
+        End If
+    Catch ex As Exception
+        Throw New Exception("Description was changed, but the file could not be saved." & vbCrLf & ex.Message)
+    End Try
+
+End Sub
+
+Function GetComponentCC( _
+    ByVal oParams As Parameters, _
+    ByVal componentTitle As String) As String
+
+    Dim systemValue As String = _
+        UCase(Trim(T(oParams, "System", "")))
+
+    If systemValue = "RX2" Then
+
+        Select Case UCase(Trim(componentTitle))
+
+            Case "DRIVE FRAME", _
+                 "CYLINDER MOUNT", _
+                 "CYLINDER MOUNT ASSEMBLY", _
+                 "STIFFENER", _
+                 "CROSSMEMBER"
+
+                Return "5.0in"
+
+        End Select
+
+    End If
+
+    Return P(oParams, "CC")
+
+End Function
+
+		
+		
+		
+'==================================================
+' BUILD GENERATED DESCRIPTION BY DOCUMENT TITLE
+'==================================================
+Function BuildGeneratedDescriptionByTitle( _
+    ByVal title As String, _
+    ByVal oParams As Parameters) As String
+
+    Dim cleanTitle As String = NormalizeTitle(title)
+
+    Select Case cleanTitle
+
+        Case "DRIVE ASSEMBLY"
+            Return BuildDriveAssemblyDescription(oParams)
+
+        Case "CROSSMEMBER"
+            Return BuildCrossmemberDescription(oParams)
+
+        Case "DRIVE FRAME"
+            Return BuildDriveFrameDescription(oParams)
+
+        Case "STIFFENER"
+            Return BuildStiffenerDescription(oParams)
+
+        Case "CYLINDER MOUNT"
+            Return BuildCylinderMountDescription(oParams)
+
+        Case "CYLINDER MOUNT ASSEMBLY"
+            Return BuildCylinderMountDescription(oParams)
+
+    End Select
+
+    Return ""
+
+End Function
+
+
+'==================================================
+' GET CREATED CHILD FILE LIST
+'==================================================
+' Reads DriveConfig_CreatedChildFiles.
+'
+' Expected stored format:
+'   |C:\FILE1.IPT||C:\FILE2.IAM|
+'==================================================
+Function GetCreatedChildFileList() As System.Collections.Generic.List(Of String)
+
+    Dim result As New System.Collections.Generic.List(Of String)
+    Dim seen As New System.Collections.Generic.Dictionary(Of String, Boolean)
+
+    Try
+
+        Dim rawList As String = GetSharedText("DriveConfig_CreatedChildFiles")
+
+        If Trim(rawList) = "" Then Return result
+
+        Dim parts() As String = Split(rawList, "|")
+
+        For Each part As String In parts
+
+            Dim filePath As String = Trim(part)
+
+            If filePath = "" Then Continue For
+
+            Dim key As String = UCase(filePath)
+
+            If Not seen.ContainsKey(key) Then
+                seen.Add(key, True)
+                result.Add(filePath)
+            End If
+
+        Next
+
+    Catch
+    End Try
+
+    Return result
+
+End Function

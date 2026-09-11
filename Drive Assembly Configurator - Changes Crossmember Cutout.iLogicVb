@@ -1,0 +1,1238 @@
+﻿'====================================================
+' CROSSMEMBER CC BLOCK / PROFILE UPDATE
+'====================================================
+' Uses the insertion point of the active 5.0 or 10.0
+' YZ Plane Block to recreate the X-direction Work Axis.
+'
+' Important order:
+'   1. Capture and delete ONLY the exact target iMate
+'   2. Delete the old Work Axis and tagged point
+'   3. Replace both sketch blocks and profiles
+'   4. Update the part
+'   5. Read the NEW YZ block insertion point
+'   6. Create and solve a regular Sketch Point
+'   7. Reacquire that point after update
+'   8. Create the Work Axis normal to the YZ sketch
+'   9. Recreate the exact target Mate iMate
+'
+' Other iMates in the part are never deleted or modified.
+'====================================================
+
+Sub Main()
+    Const RUN_FLAG As String = "CrossmemberCCBlockSwapRunning"
+
+    Try
+        If SharedVariable.Exists(RUN_FLAG) Then
+            If CBool(SharedVariable(RUN_FLAG)) Then Exit Sub
+        End If
+    Catch
+    End Try
+
+    Try
+        SharedVariable(RUN_FLAG) = True
+        RunCrossmemberUpdate()
+    Catch ex As Exception
+        MessageBox.Show(ex.ToString(), "Crossmember Block Swap Failed")
+    Finally
+        Try
+            SharedVariable(RUN_FLAG) = False
+        Catch
+        End Try
+    End Try
+End Sub
+
+
+Private Sub RunCrossmemberUpdate()
+    Const MATERIAL_PARAM As String = "Crossmember_Material"
+    Const REQUIRED_MATERIAL As String = "Aluminum"
+    Const CC_PARAM As String = "CC"
+    Const LENGTH_TOL_IN As Double = 0.02
+
+    Const WORK_AXIS_NAME As String = _
+        "Crossmember Center of Cylinders Work Axis1"
+
+    Const IMATE_NAME As String = _
+        "Crossmember Center of Cylinders iMate:1"
+
+    If ThisDoc.Document Is Nothing Then Exit Sub
+
+    If ThisDoc.Document.DocumentType <> _
+       DocumentTypeEnum.kPartDocumentObject Then
+
+        MessageBox.Show( _
+            "This rule must be run from a Crossmember part document.", _
+            "Crossmember Block Swap")
+        Exit Sub
+    End If
+
+    Dim partDoc As PartDocument = _
+        CType(ThisDoc.Document, PartDocument)
+
+    Dim partDef As PartComponentDefinition = _
+        partDoc.ComponentDefinition
+
+    If Not TextEquals( _
+        GetTextParameter(partDef, MATERIAL_PARAM), _
+        REQUIRED_MATERIAL) Then
+        Exit Sub
+    End If
+
+    Dim ccValue As Double = _
+        GetLengthParameterInches(partDef, CC_PARAM)
+
+    Dim ccText As String = ""
+
+    If Math.Abs(ccValue - 5.0) < 0.001 Then
+        ccText = "5.0"
+    ElseIf Math.Abs(ccValue - 10.0) < 0.001 Then
+        ccText = "10.0"
+    Else
+        MessageBox.Show( _
+            "Unsupported CC value: " & ccValue.ToString() & " in" & _
+            vbCrLf & vbCrLf & _
+            "Supported values are 5.0 in and 10.0 in.", _
+            "Unsupported CC")
+        Exit Sub
+    End If
+
+    Dim iMateOffset As String = "0 in"
+    Dim iMateExported As Boolean = False
+    Dim iMateMatchList As Object = Nothing
+
+    'Remove dependent items before changing the block/profile.
+    CaptureAndDeleteIMate( _
+        partDef, _
+        IMATE_NAME, _
+        iMateOffset, _
+        iMateExported, _
+        iMateMatchList)
+
+    DeleteWorkAxisByName(partDef, WORK_AXIS_NAME)
+
+    Dim yzSketch As PlanarSketch = _
+        FindSketch(partDef, "YZ Plane Sketch")
+
+    If Not yzSketch Is Nothing Then
+        DeleteTaggedAxisSketchPoint(yzSketch)
+    End If
+
+    If Not ProcessSketch( _
+        partDef, _
+        "YZ Plane Sketch", _
+        "YZ Plane Extrusion", _
+        ccText & " inch CC YZ Plane Block", _
+        New Double() {30.0, 10.0}, _
+        New Double() {30.0, 10.0}, _
+        New String() {"4.5 in", "0 in"}, _
+        New String() { _
+            "Crossmember_YZ_30_Offset", _
+            "Crossmember_YZ_10_Offset"}, _
+        LENGTH_TOL_IN) Then
+        Exit Sub
+    End If
+
+    If Not ProcessSketch( _
+        partDef, _
+        "XY Plane Sketch", _
+        "XY Plane Extrusion", _
+        ccText & " inch CC XY Plane Block", _
+        New Double() {5.0, 10.0}, _
+        New Double() {5.0, 10.0}, _
+        New String() {"0 in", "0 in"}, _
+        New String() { _
+            "Crossmember_XY_5_Offset", _
+            "Crossmember_XY_10_Offset"}, _
+        LENGTH_TOL_IN) Then
+        Exit Sub
+    End If
+
+    'Fully solve both rebuilt profiles before creating the axis.
+    UpdatePart(partDoc)
+
+    RecreateAxisAndIMateFromYZBlockInsertionPoint( _
+        partDoc, _
+        ccText & " inch CC YZ Plane Block", _
+        WORK_AXIS_NAME, _
+        IMATE_NAME, _
+        iMateOffset, _
+        iMateExported, _
+        iMateMatchList)
+
+    UpdatePart(partDoc)
+End Sub
+
+
+Private Sub RecreateAxisAndIMateFromYZBlockInsertionPoint( _
+    ByVal partDoc As PartDocument, _
+    ByVal blockDefinitionName As String, _
+    ByVal workAxisName As String, _
+    ByVal iMateName As String, _
+    ByVal iMateOffset As String, _
+    ByVal iMateExported As Boolean, _
+    ByVal iMateMatchList As Object)
+
+    Dim partDef As PartComponentDefinition = _
+        partDoc.ComponentDefinition
+
+    Dim sketch As PlanarSketch = _
+        FindSketch(partDef, "YZ Plane Sketch")
+
+    If sketch Is Nothing Then
+        Throw New Exception("Could not find YZ Plane Sketch.")
+    End If
+
+    Dim targetBlock As SketchBlock = _
+        FindSketchBlockByDefinitionName( _
+            sketch, _
+            blockDefinitionName)
+
+    If targetBlock Is Nothing Then
+        Throw New Exception( _
+            "Could not find the active YZ Plane Block." & _
+            vbCrLf & vbCrLf & _
+            "Required block: " & blockDefinitionName)
+    End If
+
+    'Copy the NEW block instance insertion point.
+    Dim sourcePosition As Point2d = targetBlock.Position
+
+    If sourcePosition Is Nothing Then
+        Throw New Exception( _
+            "Could not read the insertion point of:" & _
+            vbCrLf & blockDefinitionName)
+    End If
+
+    Dim insertionPoint As Point2d = _
+        ThisApplication.TransientGeometry.CreatePoint2d( _
+            sourcePosition.X, _
+            sourcePosition.Y)
+
+    DeleteTaggedAxisSketchPoint(sketch)
+
+    'False means this is a regular Sketch Point, not a hole center.
+    Dim axisSketchPoint As SketchPoint = _
+        sketch.SketchPoints.Add(insertionPoint, False)
+
+    TagAxisSketchPoint(axisSketchPoint)
+
+    'Solve the new point before using it as a Work Axis input.
+    UpdatePart(partDoc)
+
+    'Reacquire all COM objects after the update.
+    partDef = partDoc.ComponentDefinition
+    sketch = FindSketch(partDef, "YZ Plane Sketch")
+
+    If sketch Is Nothing Then
+        Throw New Exception( _
+            "YZ Plane Sketch could not be refreshed after update.")
+    End If
+
+    axisSketchPoint = FindTaggedAxisSketchPoint(sketch)
+
+    If axisSketchPoint Is Nothing Then
+        Throw New Exception( _
+            "The insertion-point Sketch Point could not be " & _
+            "refreshed after update.")
+    End If
+
+    DeleteWorkAxisByName(partDef, workAxisName)
+
+    Dim newWorkAxis As WorkAxis = Nothing
+
+    Try
+        'The normal of the YZ sketch is the model X direction.
+        newWorkAxis = _
+            partDef.WorkAxes.AddByNormalToSurface( _
+                sketch, _
+                axisSketchPoint, _
+                False)
+
+        newWorkAxis.Name = workAxisName
+        newWorkAxis.Visible = False
+    Catch ex As Exception
+        Throw New Exception( _
+            "Could not recreate the Work Axis through the YZ " & _
+            "Plane Block insertion point." & vbCrLf & vbCrLf & _
+            "Work Axis: " & workAxisName & vbCrLf & _
+            "Block: " & blockDefinitionName & vbCrLf & vbCrLf & _
+            ex.Message)
+    End Try
+
+    'Solve the axis before creating the iMate from it.
+    UpdatePart(partDoc)
+
+    partDef = partDoc.ComponentDefinition
+    newWorkAxis = FindWorkAxisByName(partDef, workAxisName)
+
+    If newWorkAxis Is Nothing Then
+        Throw New Exception( _
+            "The recreated Work Axis could not be refreshed.")
+    End If
+
+    'Remove only a stale duplicate with the exact target name.
+    'All differently named iMates remain untouched.
+    Dim staleTargetIMate As MateiMateDefinition = _
+        FindExactMateIMateByName(partDef, iMateName)
+
+    If Not staleTargetIMate Is Nothing Then
+        staleTargetIMate.Delete()
+    End If
+
+    Dim newIMate As MateiMateDefinition = Nothing
+
+    Try
+        newIMate = _
+            partDef.iMateDefinitions.AddMateiMateDefinition( _
+                Entity:=newWorkAxis, _
+                Offset:=iMateOffset, _
+                Name:=iMateName)
+    Catch ex As Exception
+        Throw New Exception( _
+            "Could not recreate the Mate iMate from the " & _
+            "YZ insertion-point Work Axis." & vbCrLf & vbCrLf & _
+            "iMate: " & iMateName & vbCrLf & _
+            "Work Axis: " & workAxisName & vbCrLf & vbCrLf & _
+            ex.Message)
+    End Try
+
+    If newIMate Is Nothing Then
+        Throw New Exception( _
+            "AddMateiMateDefinition returned Nothing.")
+    End If
+
+    Try
+        newIMate.Exported = iMateExported
+    Catch
+    End Try
+
+    If Not iMateMatchList Is Nothing Then
+        Try
+            newIMate.MatchList = iMateMatchList
+        Catch
+        End Try
+    End If
+End Sub
+
+
+Private Sub CaptureAndDeleteIMate( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal iMateName As String, _
+    ByRef offsetExpression As String, _
+    ByRef exportedValue As Boolean, _
+    ByRef matchListValue As Object)
+
+    If partDef Is Nothing Then Exit Sub
+
+    'Find only the exact Mate iMate requested by name.
+    'Every other iMate definition in the part is ignored.
+    Dim existingIMate As MateiMateDefinition = _
+        FindExactMateIMateByName(partDef, iMateName)
+
+    If existingIMate Is Nothing Then Exit Sub
+
+    Try
+        offsetExpression = existingIMate.Offset.Expression
+    Catch
+        offsetExpression = "0 in"
+    End Try
+
+    Try
+        exportedValue = existingIMate.Exported
+    Catch
+        exportedValue = False
+    End Try
+
+    Try
+        matchListValue = existingIMate.MatchList
+    Catch
+        matchListValue = Nothing
+    End Try
+
+    Try
+        existingIMate.Delete()
+    Catch ex As Exception
+        Throw New Exception( _
+            "Could not delete the exact target Mate iMate." & _
+            vbCrLf & vbCrLf & _
+            "iMate: " & iMateName & vbCrLf & vbCrLf & _
+            ex.Message)
+    End Try
+End Sub
+
+Private Function ProcessSketch( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal sketchName As String, _
+    ByVal featureName As String, _
+    ByVal targetBlockName As String, _
+    ByVal parentLengths() As Double, _
+    ByVal blockLengths() As Double, _
+    ByVal offsetExpressions() As String, _
+    ByVal dimensionNames() As String, _
+    ByVal lengthToleranceIn As Double) As Boolean
+
+    Dim phase As String = "Starting"
+    Dim replacementRequired As Boolean = False
+
+    Dim activeBlocks As ObjectCollection = _
+        ThisApplication.TransientObjects.CreateObjectCollection()
+
+    Dim oldBlocks As ObjectCollection = _
+        ThisApplication.TransientObjects.CreateObjectCollection()
+
+    Dim createdDimensions As _
+        New System.Collections.Generic.List(Of OffsetDimConstraint)
+
+    Try
+        ValidateArrays( _
+            parentLengths, _
+            blockLengths, _
+            offsetExpressions, _
+            dimensionNames)
+
+        phase = "Finding sketch and extrusion"
+
+        Dim sketch As PlanarSketch = FindSketch(partDef, sketchName)
+        Dim extrusion As ExtrudeFeature = FindExtrude(partDef, featureName)
+
+        If sketch Is Nothing Then
+            Throw New Exception("Sketch not found: " & sketchName)
+        End If
+
+        If extrusion Is Nothing Then
+            Throw New Exception("Extrusion not found: " & featureName)
+        End If
+
+        If sketch.SketchBlocks.Count = 0 Then
+            Throw New Exception( _
+                "No block instances were found in " & sketchName & ".")
+        End If
+
+        phase = "Finding target block definition"
+
+        Dim targetDef As SketchBlockDefinition = _
+            FindBlockDefinition(partDef, targetBlockName)
+
+        If targetDef Is Nothing Then
+            Throw New Exception( _
+                "Block definition not found: " & targetBlockName & _
+                vbCrLf & vbCrLf & _
+                "Available definitions:" & vbCrLf & _
+                GetBlockDefinitionList(partDef))
+        End If
+
+        For Each currentBlock As SketchBlock In sketch.SketchBlocks
+            If Not TextEquals( _
+                GetBlockDefinitionName(currentBlock), _
+                targetDef.Name) Then
+
+                replacementRequired = True
+                Exit For
+            End If
+        Next
+
+        Dim tg As TransientGeometry = _
+            ThisApplication.TransientGeometry
+
+        Dim oldPositions As ObjectCollection = _
+            ThisApplication.TransientObjects.CreateObjectCollection()
+
+        Dim oldRotations As New System.Collections.ArrayList()
+        Dim oldScales As New System.Collections.ArrayList()
+        Dim oldBlockCount As Integer = sketch.SketchBlocks.Count
+
+        If replacementRequired Then
+            For i As Integer = 1 To oldBlockCount
+                Dim oldBlock As SketchBlock = sketch.SketchBlocks.Item(i)
+                Dim oldPosition As Point2d = oldBlock.Position
+
+                oldBlocks.Add(oldBlock)
+                oldPositions.Add( _
+                    tg.CreatePoint2d(oldPosition.X, oldPosition.Y))
+
+                Try
+                    oldRotations.Add(oldBlock.Rotation)
+                Catch
+                    oldRotations.Add(0.0)
+                End Try
+
+                Try
+                    oldScales.Add(oldBlock.Scale)
+                Catch
+                    oldScales.Add(1.0)
+                End Try
+            Next
+        Else
+            For Each currentBlock As SketchBlock In sketch.SketchBlocks
+                activeBlocks.Add(currentBlock)
+            Next
+        End If
+
+        phase = "Deleting old locating dimensions"
+
+        For i As Integer = 0 To dimensionNames.Length - 1
+            DeleteDimensionByName(sketch, dimensionNames(i))
+            DeleteParameterIfExists(partDef, dimensionNames(i))
+        Next
+
+        phase = "Finding parent construction lines"
+
+        Dim parentLines As _
+            New System.Collections.Generic.List(Of SketchLine)
+
+        Dim usedParentLines As _
+            New System.Collections.Generic.List(Of SketchLine)
+
+        For i As Integer = 0 To parentLengths.Length - 1
+            Dim parentLine As SketchLine = _
+                FindUnusedLineByLength( _
+                    sketch.SketchLines, _
+                    parentLengths(i), _
+                    lengthToleranceIn, _
+                    usedParentLines)
+
+            If parentLine Is Nothing Then
+                Throw New Exception( _
+                    "Parent construction line not found: " & _
+                    parentLengths(i).ToString() & " in")
+            End If
+
+            parentLines.Add(parentLine)
+            usedParentLines.Add(parentLine)
+        Next
+
+        phase = "Inserting replacement blocks"
+
+        If replacementRequired Then
+            For i As Integer = 1 To oldBlockCount
+                Dim insertPoint As Point2d = _
+                    CType(oldPositions.Item(i), Point2d)
+
+                Dim newBlock As SketchBlock = _
+                    sketch.SketchBlocks.AddByDefinition( _
+                        targetDef, _
+                        insertPoint)
+
+                Try
+                    newBlock.Rotation = CDbl(oldRotations(i - 1))
+                Catch
+                End Try
+
+                Try
+                    newBlock.Scale = CDbl(oldScales(i - 1))
+                Catch
+                End Try
+
+                activeBlocks.Add(newBlock)
+            Next
+        End If
+
+        If activeBlocks.Count = 0 Then
+            Throw New Exception("No active block instances are available.")
+        End If
+
+        phase = "Finding block construction lines"
+
+        Dim blockLines As _
+            New System.Collections.Generic.List(Of SketchLine)
+
+        Dim usedBlockLines As _
+            New System.Collections.Generic.List(Of SketchLine)
+
+        For i As Integer = 0 To blockLengths.Length - 1
+            Dim blockLine As SketchLine = _
+                FindClosestUnusedBlockLine( _
+                    activeBlocks, _
+                    parentLines(i), _
+                    blockLengths(i), _
+                    lengthToleranceIn, _
+                    usedBlockLines)
+
+            If blockLine Is Nothing Then
+                Throw New Exception( _
+                    "Block construction line not found: " & _
+                    blockLengths(i).ToString() & " in")
+            End If
+
+            blockLines.Add(blockLine)
+            usedBlockLines.Add(blockLine)
+        Next
+
+        phase = "Creating replacement dimensions"
+
+        For i As Integer = 0 To dimensionNames.Length - 1
+            Dim newDimension As OffsetDimConstraint = _
+                sketch.DimensionConstraints.AddOffset( _
+                    parentLines(i), _
+                    blockLines(i), _
+                    GetMidTextPoint(parentLines(i), blockLines(i), tg), _
+                    False)
+
+            newDimension.Parameter.Name = dimensionNames(i)
+            newDimension.Parameter.Expression = offsetExpressions(i)
+            createdDimensions.Add(newDimension)
+        Next
+
+        phase = "Building replacement profile"
+
+        Dim profileObjects As ObjectCollection = _
+            ThisApplication.TransientObjects.CreateObjectCollection()
+
+        For i As Integer = 1 To activeBlocks.Count
+            AddProfileGeometry( _
+                CType(activeBlocks.Item(i), SketchBlock), _
+                profileObjects)
+        Next
+
+        If profileObjects.Count = 0 Then
+            Throw New Exception( _
+                "No usable profile geometry was found in the active block.")
+        End If
+
+        Dim newProfile As Profile = _
+            sketch.Profiles.AddForSolid(False, profileObjects)
+
+        If newProfile Is Nothing OrElse newProfile.Count = 0 Then
+            Throw New Exception("The replacement profile contains no paths.")
+        End If
+
+        phase = "Assigning replacement profile"
+
+        extrusion = FindExtrude(partDef, featureName)
+
+        If extrusion Is Nothing Then
+            Throw New Exception( _
+                "Extrusion was not found before profile assignment.")
+        End If
+
+        Dim assignmentError As Exception = Nothing
+
+        Try
+            Dim extrusionDef As ExtrudeDefinition = extrusion.Definition
+            extrusionDef.Profile = newProfile
+        Catch exAssign As Exception
+            assignmentError = exAssign
+        End Try
+
+        If Not assignmentError Is Nothing Then
+            Dim assignmentHResult As Integer = _
+                System.Runtime.InteropServices.Marshal. _
+                    GetHRForException(assignmentError)
+
+            Const E_FAIL As Integer = -2147467259
+
+            If assignmentHResult <> E_FAIL Then
+                Throw New Exception( _
+                    "Inventor could not assign the replacement profile." & _
+                    vbCrLf & vbCrLf & assignmentError.Message)
+            End If
+        End If
+
+        If replacementRequired Then
+            For i As Integer = oldBlocks.Count To 1 Step -1
+                CType(oldBlocks.Item(i), SketchBlock).Delete()
+            Next
+        End If
+
+        Return True
+
+    Catch ex As Exception
+        DeleteDimensions(createdDimensions)
+
+        If replacementRequired Then
+            DeleteBlocks(activeBlocks)
+        End If
+
+        MessageBox.Show( _
+            "Crossmember block swap failed." & vbCrLf & vbCrLf & _
+            "Phase: " & phase & vbCrLf & _
+            "Sketch: " & sketchName & vbCrLf & _
+            "Extrusion: " & featureName & vbCrLf & _
+            "Target block: " & targetBlockName & _
+            vbCrLf & vbCrLf & ex.Message, _
+            "Crossmember Block Swap Error")
+
+        Return False
+    End Try
+End Function
+
+
+Private Function FindSketchBlockByDefinitionName( _
+    ByVal sketch As PlanarSketch, _
+    ByVal definitionName As String) As SketchBlock
+
+    If sketch Is Nothing Then Return Nothing
+
+    For Each block As SketchBlock In sketch.SketchBlocks
+        If TextEquals( _
+            GetBlockDefinitionName(block), _
+            definitionName) Then
+
+            Return block
+        End If
+    Next
+
+    Return Nothing
+End Function
+
+
+Private Sub TagAxisSketchPoint(ByVal point As SketchPoint)
+    If point Is Nothing Then Exit Sub
+
+    Try
+        Dim setItem As AttributeSet = _
+            point.AttributeSets.Add("CrossmemberCCAxisPoint")
+
+        setItem.Add( _
+            "Purpose", _
+            ValueTypeEnum.kStringType, _
+            "Crossmember Center of Cylinders Work Axis1")
+    Catch
+    End Try
+End Sub
+
+
+Private Function FindTaggedAxisSketchPoint( _
+    ByVal sketch As PlanarSketch) As SketchPoint
+
+    If sketch Is Nothing Then Return Nothing
+
+    For Each point As SketchPoint In sketch.SketchPoints
+        Try
+            If Point.AttributeSets.NameIsUsed( _
+                "CrossmemberCCAxisPoint") Then
+                Return Point
+            End If
+        Catch
+        End Try
+    Next
+
+    Return Nothing
+End Function
+
+
+Private Sub DeleteTaggedAxisSketchPoint( _
+    ByVal sketch As PlanarSketch)
+
+    If sketch Is Nothing Then Exit Sub
+
+    For i As Integer = sketch.SketchPoints.Count To 1 Step -1
+        Try
+            Dim point As SketchPoint = sketch.SketchPoints.Item(i)
+
+            If point.AttributeSets.NameIsUsed( _
+                "CrossmemberCCAxisPoint") Then
+                point.Delete()
+            End If
+        Catch
+        End Try
+    Next
+End Sub
+
+
+Private Function FindExactMateIMateByName( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal requestedName As String) As MateiMateDefinition
+
+    If partDef Is Nothing Then Return Nothing
+    If Trim(requestedName) = "" Then Return Nothing
+
+    For Each definition As iMateDefinition _
+        In partDef.iMateDefinitions
+
+        'Ignore every non-Mate iMate.
+        Dim mateDefinition As MateiMateDefinition = _
+            TryCast(definition, MateiMateDefinition)
+
+        If mateDefinition Is Nothing Then Continue For
+
+        'Exact full-name match only, including the :1 suffix.
+        If String.Equals( _
+            Trim(mateDefinition.Name), _
+            Trim(requestedName), _
+            System.StringComparison.OrdinalIgnoreCase) Then
+
+            Return mateDefinition
+        End If
+    Next
+
+    Return Nothing
+End Function
+
+Private Function FindWorkAxisByName( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal workAxisName As String) As WorkAxis
+
+    If partDef Is Nothing Then Return Nothing
+
+    For Each axis As WorkAxis In partDef.WorkAxes
+        If TextEquals(axis.Name, workAxisName) Then Return axis
+    Next
+
+    Return Nothing
+End Function
+
+
+Private Sub DeleteWorkAxisByName( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal workAxisName As String)
+
+    Dim axis As WorkAxis = _
+        FindWorkAxisByName(partDef, workAxisName)
+
+    If axis Is Nothing Then Exit Sub
+
+    Try
+        axis.Delete()
+    Catch ex As Exception
+        Throw New Exception( _
+            "Could not delete the existing Work Axis." & _
+            vbCrLf & vbCrLf & _
+            "Work Axis: " & workAxisName & vbCrLf & vbCrLf & _
+            ex.Message)
+    End Try
+End Sub
+
+
+Private Sub ValidateArrays( _
+    ByVal parentLengths() As Double, _
+    ByVal blockLengths() As Double, _
+    ByVal offsets() As String, _
+    ByVal dimensionNames() As String)
+
+    If parentLengths Is Nothing OrElse _
+       blockLengths Is Nothing OrElse _
+       offsets Is Nothing OrElse _
+       dimensionNames Is Nothing Then
+        Throw New Exception("One or more setup arrays are Nothing.")
+    End If
+
+    If parentLengths.Length = 0 OrElse _
+       blockLengths.Length <> parentLengths.Length OrElse _
+       offsets.Length <> parentLengths.Length OrElse _
+       dimensionNames.Length <> parentLengths.Length Then
+        Throw New Exception( _
+            "The setup arrays do not contain matching entry counts.")
+    End If
+End Sub
+
+
+Private Function GetTextParameter( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal parameterName As String) As String
+
+    Try
+        Dim p As UserParameter = _
+            partDef.Parameters.UserParameters.Item(parameterName)
+
+        Return Trim(Replace(CStr(p.Value), """", ""))
+    Catch
+        Return ""
+    End Try
+End Function
+
+
+Private Function GetLengthParameterInches( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal parameterName As String) As Double
+
+    Try
+        Dim p As UserParameter = _
+            partDef.Parameters.UserParameters.Item(parameterName)
+
+        Dim expressionValue As Double = _
+            ExtractFirstNumber(CStr(p.Expression))
+
+        If expressionValue > 0 Then Return expressionValue
+        Return CDbl(p.Value) / 2.54
+    Catch
+        Return 0
+    End Try
+End Function
+
+
+Private Function FindSketch( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal sketchName As String) As PlanarSketch
+
+    Try
+        For Each sketch As PlanarSketch In partDef.Sketches
+            If TextEquals(Sketch.Name, sketchName) Then Return Sketch
+        Next
+    Catch
+    End Try
+
+    Return Nothing
+End Function
+
+
+Private Function FindExtrude( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal featureName As String) As ExtrudeFeature
+
+    Try
+        For Each feature As ExtrudeFeature _
+            In partDef.Features.ExtrudeFeatures
+
+            If TextEquals(Feature.Name, featureName) Then Return Feature
+        Next
+    Catch
+    End Try
+
+    Return Nothing
+End Function
+
+
+Private Function FindBlockDefinition( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal definitionName As String) As SketchBlockDefinition
+
+    Try
+        For Each definition As SketchBlockDefinition _
+            In partDef.SketchBlockDefinitions
+
+            If TextEquals(definition.Name, definitionName) Then
+                Return definition
+            End If
+        Next
+    Catch
+    End Try
+
+    Return Nothing
+End Function
+
+
+Private Function GetBlockDefinitionName( _
+    ByVal block As SketchBlock) As String
+
+    Try
+        Return block.Definition.Name
+    Catch
+        Return ""
+    End Try
+End Function
+
+
+Private Function GetBlockDefinitionList( _
+    ByVal partDef As PartComponentDefinition) As String
+
+    Dim result As String = ""
+
+    For Each definition As SketchBlockDefinition _
+        In partDef.SketchBlockDefinitions
+
+        result &= "[" & definition.Name & "]" & vbCrLf
+    Next
+
+    If result = "" Then result = "<No block definitions>"
+    Return result
+End Function
+
+
+Private Sub DeleteDimensionByName( _
+    ByVal sketch As PlanarSketch, _
+    ByVal parameterName As String)
+
+    For i As Integer = sketch.DimensionConstraints.Count To 1 Step -1
+        Try
+            Dim constraint As Object = sketch.DimensionConstraints.Item(i)
+
+            If TextEquals( _
+                CStr(constraint.Parameter.Name), _
+                parameterName) Then
+                constraint.Delete()
+            End If
+        Catch
+        End Try
+    Next
+End Sub
+
+
+Private Sub DeleteParameterIfExists( _
+    ByVal partDef As PartComponentDefinition, _
+    ByVal parameterName As String)
+
+    Dim parameterToDelete As Inventor.Parameter = Nothing
+
+    For Each currentParameter As Inventor.Parameter _
+        In partDef.Parameters
+
+        If TextEquals(currentParameter.Name, parameterName) Then
+            parameterToDelete = currentParameter
+            Exit For
+        End If
+    Next
+
+    If parameterToDelete Is Nothing Then Exit Sub
+
+    Try
+        parameterToDelete.Delete()
+    Catch ex As Exception
+        Throw New Exception( _
+            "The old parameter name could not be released: " & _
+            parameterName & vbCrLf & vbCrLf & ex.Message)
+    End Try
+End Sub
+
+
+Private Function FindUnusedLineByLength( _
+    ByVal lines As SketchLines, _
+    ByVal targetLengthIn As Double, _
+    ByVal toleranceIn As Double, _
+    ByVal usedLines As _
+        System.Collections.Generic.List(Of SketchLine)) As SketchLine
+
+    Dim targetCm As Double = targetLengthIn * 2.54
+    Dim toleranceCm As Double = toleranceIn * 2.54
+    Dim bestLine As SketchLine = Nothing
+    Dim bestDifference As Double = Double.MaxValue
+
+    For Each line As SketchLine In lines
+        Try
+            If Not Line.Construction Then Continue For
+            If usedLines.Contains(Line) Then Continue For
+
+            Dim difference As Double = _
+                Math.Abs(GetLineLengthCm(Line) - targetCm)
+
+            If difference <= toleranceCm AndAlso _
+               difference < bestDifference Then
+                bestDifference = difference
+                bestLine = Line
+            End If
+        Catch
+        End Try
+    Next
+
+    Return bestLine
+End Function
+
+
+Private Function FindClosestUnusedBlockLine( _
+    ByVal blocks As ObjectCollection, _
+    ByVal parentLine As SketchLine, _
+    ByVal targetLengthIn As Double, _
+    ByVal toleranceIn As Double, _
+    ByVal usedLines As _
+        System.Collections.Generic.List(Of SketchLine)) As SketchLine
+
+    Dim bestLine As SketchLine = Nothing
+    Dim bestDistance As Double = Double.MaxValue
+    Dim parentX As Double = GetLineMidX(parentLine)
+    Dim parentY As Double = GetLineMidY(parentLine)
+
+    For i As Integer = 1 To blocks.Count
+        Dim block As SketchBlock = _
+            TryCast(blocks.Item(i), SketchBlock)
+
+        If block Is Nothing Then Continue For
+
+        For Each definitionLine As SketchLine _
+            In block.Definition.SketchLines
+
+            Try
+                If Not definitionLine.Construction Then Continue For
+
+                If Not LineLengthMatches( _
+                    definitionLine, _
+                    targetLengthIn, _
+                    toleranceIn) Then Continue For
+
+                Dim instanceLine As SketchLine = _
+                    TryCast(block.GetObject(definitionLine), SketchLine)
+
+                If instanceLine Is Nothing Then Continue For
+                If usedLines.Contains(instanceLine) Then Continue For
+
+                Dim dx As Double = GetLineMidX(instanceLine) - parentX
+                Dim dy As Double = GetLineMidY(instanceLine) - parentY
+                Dim distance As Double = _
+                    Math.Sqrt((dx * dx) + (dy * dy))
+
+                If distance < bestDistance Then
+                    bestDistance = distance
+                    bestLine = instanceLine
+                End If
+            Catch
+            End Try
+        Next
+    Next
+
+    Return bestLine
+End Function
+
+
+Private Function LineLengthMatches( _
+    ByVal line As SketchLine, _
+    ByVal targetLengthIn As Double, _
+    ByVal toleranceIn As Double) As Boolean
+
+    Try
+        Return Math.Abs( _
+            GetLineLengthCm(line) - (targetLengthIn * 2.54)) <= _
+            (toleranceIn * 2.54)
+    Catch
+        Return False
+    End Try
+End Function
+
+
+Private Function GetLineLengthCm(ByVal line As SketchLine) As Double
+    Dim p1 As Point2d = line.StartSketchPoint.Geometry
+    Dim p2 As Point2d = line.EndSketchPoint.Geometry
+    Dim dx As Double = p2.X - p1.X
+    Dim dy As Double = p2.Y - p1.Y
+    Return Math.Sqrt((dx * dx) + (dy * dy))
+End Function
+
+
+Private Sub AddProfileGeometry( _
+    ByVal block As SketchBlock, _
+    ByVal profileObjects As ObjectCollection)
+
+    For Each circle As SketchCircle _
+        In block.Definition.SketchCircles
+
+        If Not Circle.Construction Then
+            AddInstanceObject(block, Circle, profileObjects)
+        End If
+    Next
+
+    For Each line As SketchLine _
+        In block.Definition.SketchLines
+
+        If Not Line.Construction Then
+            AddInstanceObject(block, Line, profileObjects)
+        End If
+    Next
+
+    For Each arc As SketchArc In block.Definition.SketchArcs
+        If Not arc.Construction Then
+            AddInstanceObject(block, arc, profileObjects)
+        End If
+    Next
+End Sub
+
+
+Private Sub AddInstanceObject( _
+    ByVal block As SketchBlock, _
+    ByVal definitionEntity As Object, _
+    ByVal profileObjects As ObjectCollection)
+
+    Try
+        Dim instanceEntity As Object = block.GetObject(definitionEntity)
+        If Not instanceEntity Is Nothing Then
+            profileObjects.Add(instanceEntity)
+        End If
+    Catch
+    End Try
+End Sub
+
+
+Private Sub DeleteBlocks(ByVal blocks As ObjectCollection)
+    If blocks Is Nothing Then Exit Sub
+
+    For i As Integer = blocks.Count To 1 Step -1
+        Try
+            Dim block As SketchBlock = _
+                TryCast(blocks.Item(i), SketchBlock)
+
+            If Not block Is Nothing Then block.Delete()
+        Catch
+        End Try
+    Next
+End Sub
+
+
+Private Sub DeleteDimensions( _
+    ByVal dimensions As _
+        System.Collections.Generic.List(Of OffsetDimConstraint))
+
+    If dimensions Is Nothing Then Exit Sub
+
+    For i As Integer = dimensions.Count - 1 To 0 Step -1
+        Try
+            dimensions(i).Delete()
+        Catch
+        End Try
+    Next
+End Sub
+
+
+Private Function GetMidTextPoint( _
+    ByVal lineA As SketchLine, _
+    ByVal lineB As SketchLine, _
+    ByVal tg As TransientGeometry) As Point2d
+
+    Return tg.CreatePoint2d( _
+        (GetLineMidX(lineA) + GetLineMidX(lineB)) / 2.0, _
+        (GetLineMidY(lineA) + GetLineMidY(lineB)) / 2.0)
+End Function
+
+
+Private Function GetLineMidX(ByVal line As SketchLine) As Double
+    Return ( _
+        line.StartSketchPoint.Geometry.X + _
+        line.EndSketchPoint.Geometry.X) / 2.0
+End Function
+
+
+Private Function GetLineMidY(ByVal line As SketchLine) As Double
+    Return ( _
+        line.StartSketchPoint.Geometry.Y + _
+        line.EndSketchPoint.Geometry.Y) / 2.0
+End Function
+
+
+Private Function ExtractFirstNumber(ByVal textValue As String) As Double
+    Try
+        Dim match As System.Text.RegularExpressions.Match = _
+            System.Text.RegularExpressions.Regex.Match( _
+                textValue, _
+                "[-+]?\d*\.?\d+")
+
+        If match.Success Then Return CDbl(match.Value)
+    Catch
+    End Try
+
+    Return 0
+End Function
+
+
+Private Function TextEquals( _
+    ByVal firstValue As String, _
+    ByVal secondValue As String) As Boolean
+
+    If firstValue Is Nothing Then firstValue = ""
+    If secondValue Is Nothing Then secondValue = ""
+
+    Return String.Equals( _
+        Trim(firstValue), _
+        Trim(secondValue), _
+        System.StringComparison.OrdinalIgnoreCase)
+End Function
+
+
+Private Sub UpdatePart(ByVal partDoc As PartDocument)
+    If partDoc Is Nothing Then
+        Throw New Exception("Part document is Nothing.")
+    End If
+
+    Dim update2Message As String = ""
+
+    Try
+        If partDoc.Update2(True) Then Exit Sub
+        update2Message = "Update2 returned False."
+    Catch ex As Exception
+        update2Message = ex.Message
+    End Try
+
+    Try
+        partDoc.Update()
+    Catch ex As Exception
+        Throw New Exception( _
+            "Inventor could not update the part." & _
+            vbCrLf & vbCrLf & _
+            "Update2: " & update2Message & vbCrLf & _
+            "Update: " & ex.Message)
+    End Try
+End Sub

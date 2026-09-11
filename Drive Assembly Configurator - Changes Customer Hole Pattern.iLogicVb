@@ -1,0 +1,1045 @@
+﻿'====================================================
+' CUSTOMER HOLE PATTERN BLOCK / PROFILE UPDATE
+'====================================================
+Sub Main()
+    Const RUN_FLAG As String = "CustomerHolePatternRuleRunning"
+
+    Try
+        If SharedVariable.Exists(RUN_FLAG) Then
+            If CBool(SharedVariable(RUN_FLAG)) Then Exit Sub
+        End If
+    Catch
+    End Try
+
+    SharedVariable(RUN_FLAG) = True
+
+    Try
+        RunCustomerHolePatternUpdate()
+    Catch ex As Exception
+        MessageBox.Show(ex.ToString(), "Customer Hole Pattern Rule Failed")
+    Finally
+        Try
+            SharedVariable(RUN_FLAG) = False
+        Catch
+        End Try
+    End Try
+End Sub
+
+
+Private Sub RunCustomerHolePatternUpdate()
+
+    '====================================================
+    ' SETTINGS
+    '====================================================
+    Const PREFERRED_SKETCH_NAME As String = "Customer Hole Pattern Sketch"
+    Const FEATURE_NAME As String = "Customer Hole Pattern Extrusion"
+    Const CUSTOMER_PARAM As String = "Customer"
+
+    Const MASTER_X_PARAM As String = "Hole_Pattern_X"
+    Const MASTER_Y_PARAM As String = "Hole_Pattern_Y"
+    Const DIM_X_PARAM As String = "Hole_Pattern_X2"
+    Const DIM_Y_PARAM As String = "Hole_Pattern_Y2"
+
+    Const PARENT_Y_LINE_LENGTH_IN As Double = 20.0
+    Const BLOCK_Y_LINE_LENGTH_IN As Double = 15.0
+    Const PARENT_X_LINE_LENGTH_IN As Double = 5.0
+    Const BLOCK_X_LINE_LENGTH_IN As Double = 10.0
+
+    Const LENGTH_TOL_IN As Double = 0.02
+    Const HORIZONTAL_TOL_CM As Double = 0.001
+    Const VERTICAL_TOL_CM As Double = 0.001
+
+
+    '====================================================
+    ' DOCUMENT
+    '====================================================
+    If ThisDoc.Document Is Nothing Then Exit Sub
+
+    If ThisDoc.Document.DocumentType <> _
+       DocumentTypeEnum.kPartDocumentObject Then
+        MessageBox.Show("This rule must run from a part document.", "iLogic")
+        Exit Sub
+    End If
+
+    Dim oPartDoc As PartDocument = CType(ThisDoc.Document, PartDocument)
+    Dim oPartDef As PartComponentDefinition = oPartDoc.ComponentDefinition
+    Dim tg As TransientGeometry = ThisApplication.TransientGeometry
+
+
+    '====================================================
+    ' OPTIONAL FEATURE CHECK
+    ' Normal templates without this extrusion are skipped.
+    '====================================================
+    Dim oExtrude As ExtrudeFeature = FindExtrudeByName(oPartDef, FEATURE_NAME)
+    If oExtrude Is Nothing Then Exit Sub
+
+
+    '====================================================
+    ' CUSTOMER AND TARGET BLOCK DEFINITION
+    '====================================================
+    Dim customerParam As UserParameter = _
+        FindUserParameterByName(oPartDef, CUSTOMER_PARAM)
+
+    If customerParam Is Nothing Then
+        MessageBox.Show("Could not find User Parameter: " & CUSTOMER_PARAM, _
+                        "Customer Parameter Missing")
+        Exit Sub
+    End If
+
+    Dim customerName As String = ""
+    Try
+        customerName = Trim(CStr(customerParam.Value))
+    Catch ex As Exception
+        MessageBox.Show("Could not read Customer parameter." & vbCrLf & vbCrLf & _
+                        ex.Message, "Customer Parameter Error")
+        Exit Sub
+    End Try
+
+    If customerName = "" Then
+        MessageBox.Show("Customer parameter is blank.", "Customer Parameter Error")
+        Exit Sub
+    End If
+
+    ' Do not append :1. Inventor owns the instance suffix.
+    Dim targetBlockName As String = customerName & "1"
+
+    Dim targetDef As SketchBlockDefinition = _
+        FindBlockDefinitionByName(oPartDef, targetBlockName)
+
+    If targetDef Is Nothing Then
+        MessageBox.Show("Could not find block definition:" & vbCrLf & vbCrLf & _
+                        targetBlockName & vbCrLf & vbCrLf & _
+                        "Available definitions:" & vbCrLf & _
+                        GetBlockDefinitionNameList(oPartDef), _
+                        "Block Definition Not Found")
+        Exit Sub
+    End If
+
+
+    '====================================================
+    ' SKETCH
+    ' First use the extrusion profile's actual parent sketch.
+    ' Then use safe fallbacks for normal and formed parts.
+    '====================================================
+    Dim oSketch As PlanarSketch = GetSketchFromExtrude(oExtrude)
+
+    If oSketch Is Nothing Then
+        oSketch = FindSketchByName(oPartDef.Sketches, PREFERRED_SKETCH_NAME)
+    End If
+
+    If oSketch Is Nothing Then
+        oSketch = FindOnlySketchContainingBlocks(oPartDef.Sketches)
+    End If
+
+    If oSketch Is Nothing Then
+        MessageBox.Show("Could not identify the customer hole-pattern sketch." & _
+                        vbCrLf & vbCrLf & _
+                        "Sketches returned by Inventor:" & vbCrLf & _
+                        GetSketchNameList(oPartDef.Sketches), _
+                        "Sketch Not Found")
+        Exit Sub
+    End If
+
+    If oSketch.SketchBlocks.Count = 0 Then
+        MessageBox.Show("No block instances were found in sketch:" & vbCrLf & _
+                        oSketch.Name, "Block Not Found")
+        Exit Sub
+    End If
+
+
+    '====================================================
+    ' MASTER PARAMETERS
+    '====================================================
+    If EnsureUserLengthParameter(oPartDef, MASTER_X_PARAM, "0 in") Is Nothing Then
+        MessageBox.Show("Could not create or find: " & MASTER_X_PARAM)
+        Exit Sub
+    End If
+
+    If EnsureUserLengthParameter(oPartDef, MASTER_Y_PARAM, "0 in") Is Nothing Then
+        MessageBox.Show("Could not create or find: " & MASTER_Y_PARAM)
+        Exit Sub
+    End If
+
+
+    '====================================================
+    ' DETERMINE WHETHER REPLACEMENT IS REQUIRED
+    '====================================================
+    Dim blockReplacementRequired As Boolean = False
+
+    For Each existingBlock As SketchBlock In oSketch.SketchBlocks
+        Dim existingDefName As String = GetBlockDefinitionName(existingBlock)
+
+        If Not TextEquals(existingDefName, targetDef.Name) Then
+            blockReplacementRequired = True
+            Exit For
+        End If
+    Next
+
+
+    '====================================================
+    ' COLLECTIONS
+    '====================================================
+    Dim activeBlocks As ObjectCollection = _
+        ThisApplication.TransientObjects.CreateObjectCollection()
+
+    Dim oldBlocks As ObjectCollection = _
+        ThisApplication.TransientObjects.CreateObjectCollection()
+
+    Dim oldPositions As ObjectCollection = _
+        ThisApplication.TransientObjects.CreateObjectCollection()
+
+    Dim oldRotations As New System.Collections.ArrayList()
+    Dim oldScales As New System.Collections.ArrayList()
+
+    Dim oldBlockCount As Integer = oSketch.SketchBlocks.Count
+
+
+    '====================================================
+    ' SAVE OLD BLOCKS OR REUSE CURRENT BLOCKS
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    If blockReplacementRequired Then
+        For i As Integer = 1 To oldBlockCount
+            Dim oldBlock As SketchBlock = oSketch.SketchBlocks.Item(i)
+            oldBlocks.Add(oldBlock)
+
+            Dim p As Point2d = oldBlock.Position
+            oldPositions.Add(tg.CreatePoint2d(p.X, p.Y))
+
+            Try
+                oldRotations.Add(oldBlock.Rotation)
+            Catch
+                oldRotations.Add(0.0)
+            End Try
+
+            Try
+                oldScales.Add(oldBlock.Scale)
+            Catch
+                oldScales.Add(1.0)
+            End Try
+        Next
+    Else
+        For Each existingBlock As SketchBlock In oSketch.SketchBlocks
+            activeBlocks.Add(existingBlock)
+        Next
+    End If
+
+
+    '====================================================
+    ' REMOVE OLD LOCATING DIMENSIONS AND FREE NAMES
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    DeleteHolePatternDimensions(oSketch, _
+                                DIM_X_PARAM, DIM_Y_PARAM, _
+                                MASTER_X_PARAM, MASTER_Y_PARAM)
+
+    DeleteParameterIfExists(oPartDef, DIM_X_PARAM)
+    DeleteParameterIfExists(oPartDef, DIM_Y_PARAM)
+
+
+    '====================================================
+    ' PARENT REFERENCE LINES
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    Dim parentLine20 As SketchLine = _
+        FindHorizontalLineByLength(oSketch.SketchLines, _
+                                   PARENT_Y_LINE_LENGTH_IN, _
+                                   LENGTH_TOL_IN, _
+                                   HORIZONTAL_TOL_CM, True)
+
+    If parentLine20 Is Nothing Then
+        MessageBox.Show("Could not find the horizontal 20-inch construction line.", _
+                        "Parent Y Reference Not Found")
+        Exit Sub
+    End If
+
+    Dim parentLine5 As SketchLine = _
+        FindVerticalLineByLength(oSketch.SketchLines, _
+                                 PARENT_X_LINE_LENGTH_IN, _
+                                 LENGTH_TOL_IN, _
+                                 VERTICAL_TOL_CM, True)
+
+    If parentLine5 Is Nothing Then
+        MessageBox.Show("Could not find the vertical 5-inch construction line.", _
+                        "Parent X Reference Not Found")
+        Exit Sub
+    End If
+
+
+    '====================================================
+    ' INSERT NEW BLOCKS
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    If blockReplacementRequired Then
+        For i As Integer = 1 To oldBlockCount
+            Dim insertPoint As Point2d = CType(oldPositions.Item(i), Point2d)
+            Dim newBlock As SketchBlock = Nothing
+
+            Try
+                newBlock = oSketch.SketchBlocks.AddByDefinition(targetDef, insertPoint)
+            Catch ex As Exception
+                DeleteBlocksInCollection(activeBlocks)
+                MessageBox.Show("Could not insert replacement block:" & vbCrLf & _
+                                targetDef.Name & vbCrLf & vbCrLf & ex.Message, _
+                                "Block Insert Failed")
+                Exit Sub
+            End Try
+
+            Try
+                newBlock.Rotation = CDbl(oldRotations(i - 1))
+            Catch
+            End Try
+
+            Try
+                newBlock.Scale = CDbl(oldScales(i - 1))
+            Catch
+            End Try
+
+            activeBlocks.Add(newBlock)
+        Next
+    End If
+
+    If activeBlocks.Count = 0 Then
+        MessageBox.Show("No active customer hole-pattern blocks exist.", _
+                        "Block Processing Failed")
+        Exit Sub
+    End If
+
+
+    '====================================================
+    ' FIND BLOCK REFERENCE LINES
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    Dim dimBlockLine15 As SketchLine = _
+        FindClosestHorizontalBlockLine(activeBlocks, parentLine20, _
+                                       BLOCK_Y_LINE_LENGTH_IN, _
+                                       LENGTH_TOL_IN, _
+                                       HORIZONTAL_TOL_CM)
+
+    If dimBlockLine15 Is Nothing Then
+        If blockReplacementRequired Then DeleteBlocksInCollection(activeBlocks)
+        MessageBox.Show("Could not find the horizontal 15-inch construction line " & _
+                        "in the active block.", "Block Y Reference Not Found")
+        Exit Sub
+    End If
+
+    Dim dimBlockLine10 As SketchLine = _
+        FindClosestVerticalBlockLine(activeBlocks, parentLine5, _
+                                     BLOCK_X_LINE_LENGTH_IN, _
+                                     LENGTH_TOL_IN, _
+                                     VERTICAL_TOL_CM)
+
+    If dimBlockLine10 Is Nothing Then
+        If blockReplacementRequired Then DeleteBlocksInCollection(activeBlocks)
+        MessageBox.Show("Could not find the vertical 10-inch construction line " & _
+                        "in the active block.", "Block X Reference Not Found")
+        Exit Sub
+    End If
+
+
+    '====================================================
+    ' CREATE REPLACEMENT DIMENSIONS
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    Dim newDimY As OffsetDimConstraint = Nothing
+    Dim newDimX As OffsetDimConstraint = Nothing
+
+    Try
+        newDimY = oSketch.DimensionConstraints.AddOffset( _
+            parentLine20, dimBlockLine15, _
+            GetMidTextPoint(parentLine20, dimBlockLine15, tg), False)
+
+        newDimY.Parameter.Name = DIM_Y_PARAM
+        newDimY.Parameter.Expression = MASTER_Y_PARAM
+    Catch ex As Exception
+        If blockReplacementRequired Then DeleteBlocksInCollection(activeBlocks)
+        MessageBox.Show("Could not create the replacement Y dimension." & _
+                        vbCrLf & vbCrLf & ex.Message, "Y Dimension Failed")
+        Exit Sub
+    End Try
+
+    Try
+        newDimX = oSketch.DimensionConstraints.AddOffset( _
+            parentLine5, dimBlockLine10, _
+            GetMidTextPoint(parentLine5, dimBlockLine10, tg), False)
+
+        newDimX.Parameter.Name = DIM_X_PARAM
+        newDimX.Parameter.Expression = MASTER_X_PARAM
+    Catch ex As Exception
+        Try
+            If Not newDimY Is Nothing Then newDimY.Delete()
+        Catch
+        End Try
+
+        If blockReplacementRequired Then DeleteBlocksInCollection(activeBlocks)
+        MessageBox.Show("Could not create the replacement X dimension." & _
+                        vbCrLf & vbCrLf & ex.Message, "X Dimension Failed")
+        Exit Sub
+    End Try
+
+
+    '====================================================
+    ' BUILD PROFILE FROM ACTIVE BLOCKS ONLY
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    Dim profileObjects As ObjectCollection = _
+        ThisApplication.TransientObjects.CreateObjectCollection()
+
+    For i As Integer = 1 To activeBlocks.Count
+        Dim currentBlock As SketchBlock = _
+            CType(activeBlocks.Item(i), SketchBlock)
+
+        AddProfileGeometryFromBlockInstance(currentBlock, profileObjects)
+    Next
+
+    If profileObjects.Count = 0 Then
+        MessageBox.Show("No usable profile geometry was found in the active block.", _
+                        "Profile Geometry Not Found")
+        Exit Sub
+    End If
+
+    Dim newProfile As Profile = Nothing
+
+    Try
+        newProfile = oSketch.Profiles.AddForSolid(False, profileObjects)
+    Catch ex As Exception
+        MessageBox.Show("Could not create the replacement profile." & _
+                        vbCrLf & vbCrLf & ex.Message, "Profile Creation Failed")
+        Exit Sub
+    End Try
+
+    If newProfile Is Nothing Then
+        MessageBox.Show("Profiles.AddForSolid returned Nothing.", _
+                        "Profile Creation Failed")
+        Exit Sub
+    End If
+
+
+    '====================================================
+    ' ASSIGN NEW PROFILE
+    ' NO DOCUMENT UPDATE
+    ' NO MIRROR SUPPRESSION
+    ' NO END-OF-PART MOVEMENT
+    '====================================================
+    oExtrude = FindExtrudeByName(oPartDef, FEATURE_NAME)
+
+    If oExtrude Is Nothing Then
+        MessageBox.Show("The extrusion could not be found before profile assignment.", _
+                        "Extrusion Not Found")
+        Exit Sub
+    End If
+
+    Try
+        oExtrude.Definition.Profile = newProfile
+    Catch ex As Exception
+        MessageBox.Show("Could not assign the replacement profile to the extrusion." & _
+                        vbCrLf & vbCrLf & _
+                        "Extrusion: " & oExtrude.Name & vbCrLf & _
+                        "Sketch: " & oSketch.Name & vbCrLf & vbCrLf & _
+                        ex.Message, "Extrusion Profile Update Failed")
+        Exit Sub
+    End Try
+
+
+    '====================================================
+    ' DELETE OLD BLOCKS AFTER PROFILE REDIRECTION
+    ' NO DOCUMENT UPDATE
+    '====================================================
+    If blockReplacementRequired Then
+        For i As Integer = oldBlocks.Count To 1 Step -1
+            Dim oldBlock As SketchBlock = Nothing
+
+            Try
+                oldBlock = CType(oldBlocks.Item(i), SketchBlock)
+            Catch
+                oldBlock = Nothing
+            End Try
+
+            If oldBlock Is Nothing Then Continue For
+
+            Try
+                oldBlock.Delete()
+            Catch ex As Exception
+                MessageBox.Show("The extrusion was redirected to the new profile, " & _
+                                "but Inventor would not delete the old block." & _
+                                vbCrLf & vbCrLf & _
+                                "Old block definition: " & _
+                                GetBlockDefinitionName(oldBlock) & _
+                                vbCrLf & vbCrLf & ex.Message, _
+                                "Old Block Delete Failed")
+                Exit Sub
+            End Try
+        Next
+    End If
+
+
+    '====================================================
+    ' THE ONLY DOCUMENT UPDATE IN THIS RULE
+    '====================================================
+    UpdatePart(oPartDoc)
+
+End Sub
+
+
+'====================================================
+' LOOKUP HELPERS
+'====================================================
+Private Function FindUserParameterByName( _
+    ByVal oPartDef As PartComponentDefinition, _
+    ByVal parameterName As String) As UserParameter
+
+    If oPartDef Is Nothing Then Return Nothing
+
+    Try
+        For Each p As UserParameter In oPartDef.Parameters.UserParameters
+            If TextEquals(p.Name, parameterName) Then Return p
+        Next
+    Catch
+    End Try
+
+    Return Nothing
+End Function
+
+
+Private Function EnsureUserLengthParameter( _
+    ByVal oPartDef As PartComponentDefinition, _
+    ByVal parameterName As String, _
+    ByVal defaultExpression As String) As UserParameter
+
+    Dim existing As UserParameter = _
+        FindUserParameterByName(oPartDef, parameterName)
+
+    If Not existing Is Nothing Then Return existing
+
+    Try
+        Return oPartDef.Parameters.UserParameters.AddByExpression( _
+            parameterName, defaultExpression, UnitsTypeEnum.kInchLengthUnits)
+    Catch
+        Return Nothing
+    End Try
+End Function
+
+
+Private Function FindExtrudeByName( _
+    ByVal oPartDef As PartComponentDefinition, _
+    ByVal featureName As String) As ExtrudeFeature
+
+    If oPartDef Is Nothing Then Return Nothing
+
+    Try
+        For Each f As ExtrudeFeature In oPartDef.Features.ExtrudeFeatures
+            If TextEquals(f.Name, featureName) Then Return f
+        Next
+    Catch
+    End Try
+
+    Return Nothing
+End Function
+
+
+Private Function FindBlockDefinitionByName( _
+    ByVal oPartDef As PartComponentDefinition, _
+    ByVal definitionName As String) As SketchBlockDefinition
+
+    If oPartDef Is Nothing Then Return Nothing
+
+    Try
+        For Each d As SketchBlockDefinition In oPartDef.SketchBlockDefinitions
+            If TextEquals(d.Name, definitionName) Then Return d
+        Next
+    Catch
+    End Try
+
+    Return Nothing
+End Function
+
+
+Private Function GetSketchFromExtrude( _
+    ByVal oExtrude As ExtrudeFeature) As PlanarSketch
+
+    If oExtrude Is Nothing Then Return Nothing
+
+    Try
+        Dim p As Profile = oExtrude.Definition.Profile
+        If p Is Nothing Then Return Nothing
+        Return TryCast(p.Parent, PlanarSketch)
+    Catch
+        Return Nothing
+    End Try
+End Function
+
+
+Private Function FindSketchByName( _
+    ByVal sketches As PlanarSketches, _
+    ByVal sketchName As String) As PlanarSketch
+
+    If sketches Is Nothing Then Return Nothing
+
+    Try
+        For Each s As PlanarSketch In sketches
+            If TextEquals(s.Name, sketchName) Then Return s
+        Next
+    Catch
+    End Try
+
+    Return Nothing
+End Function
+
+
+Private Function FindOnlySketchContainingBlocks( _
+    ByVal sketches As PlanarSketches) As PlanarSketch
+
+    If sketches Is Nothing Then Return Nothing
+
+    Dim foundSketch As PlanarSketch = Nothing
+    Dim foundCount As Integer = 0
+
+    Try
+        For Each s As PlanarSketch In sketches
+            If s.SketchBlocks.Count > 0 Then
+                foundSketch = s
+                foundCount += 1
+            End If
+        Next
+    Catch
+        Return Nothing
+    End Try
+
+    If foundCount = 1 Then Return foundSketch
+    Return Nothing
+End Function
+
+
+'====================================================
+' PARAMETER / DIMENSION CLEANUP
+'====================================================
+Private Sub DeleteParameterIfExists( _
+    ByVal oPartDef As PartComponentDefinition, _
+    ByVal parameterName As String)
+
+    If oPartDef Is Nothing Then Exit Sub
+
+    Dim parameterToDelete As Inventor.Parameter = Nothing
+
+    Try
+        For Each p As Inventor.Parameter In oPartDef.Parameters
+            If TextEquals(p.Name, parameterName) Then
+                parameterToDelete = p
+                Exit For
+            End If
+        Next
+    Catch
+        parameterToDelete = Nothing
+    End Try
+
+    If parameterToDelete Is Nothing Then Exit Sub
+
+    Try
+        parameterToDelete.Delete()
+    Catch
+    End Try
+End Sub
+
+
+Private Sub DeleteHolePatternDimensions( _
+    ByVal oSketch As PlanarSketch, _
+    ByVal dimXName As String, _
+    ByVal dimYName As String, _
+    ByVal masterXName As String, _
+    ByVal masterYName As String)
+
+    If oSketch Is Nothing Then Exit Sub
+
+    For i As Integer = oSketch.DimensionConstraints.Count To 1 Step -1
+        Dim dc As Object = Nothing
+
+        Try
+            dc = oSketch.DimensionConstraints.Item(i)
+        Catch
+            dc = Nothing
+        End Try
+
+        If dc Is Nothing Then Continue For
+
+        Dim pName As String = ""
+        Dim pExpr As String = ""
+
+        Try
+            pName = CStr(dc.Parameter.Name)
+        Catch
+        End Try
+
+        Try
+            pExpr = CStr(dc.Parameter.Expression)
+        Catch
+        End Try
+
+        Dim shouldDelete As Boolean = _
+            TextEquals(pName, dimXName) OrElse _
+            TextEquals(pName, dimYName) OrElse _
+            TextEquals(pExpr, dimXName) OrElse _
+            TextEquals(pExpr, dimYName) OrElse _
+            TextEquals(pExpr, masterXName) OrElse _
+            TextEquals(pExpr, masterYName)
+
+        If shouldDelete Then
+            Try
+                dc.Delete()
+            Catch ex As Exception
+                Throw New Exception("Could not delete old hole-pattern dimension." & _
+                                    vbCrLf & "Name: " & pName & _
+                                    vbCrLf & "Expression: " & pExpr & _
+                                    vbCrLf & vbCrLf & ex.Message)
+            End Try
+        End If
+    Next
+End Sub
+
+
+'====================================================
+' BLOCK / PROFILE HELPERS
+'====================================================
+Private Function GetBlockDefinitionName( _
+    ByVal block As SketchBlock) As String
+
+    If block Is Nothing Then Return "<Invalid block>"
+
+    Try
+        Return block.Definition.Name
+    Catch
+        Return "<Definition unavailable>"
+    End Try
+End Function
+
+
+Private Sub DeleteBlocksInCollection( _
+    ByVal blocks As ObjectCollection)
+
+    If blocks Is Nothing Then Exit Sub
+
+    For i As Integer = blocks.Count To 1 Step -1
+        Try
+            Dim b As SketchBlock = TryCast(blocks.Item(i), SketchBlock)
+            If Not b Is Nothing Then b.Delete()
+        Catch
+        End Try
+    Next
+End Sub
+
+
+Private Sub AddProfileGeometryFromBlockInstance( _
+    ByVal block As SketchBlock, _
+    ByVal profileObjects As ObjectCollection)
+
+    If block Is Nothing Then Exit Sub
+    If profileObjects Is Nothing Then Exit Sub
+
+    Try
+        For Each c As SketchCircle In block.Definition.SketchCircles
+            If Not c.Construction Then AddInstanceObject(block, c, profileObjects)
+        Next
+    Catch
+    End Try
+
+    Try
+        For Each l As SketchLine In block.Definition.SketchLines
+            If Not l.Construction Then AddInstanceObject(block, l, profileObjects)
+        Next
+    Catch
+    End Try
+
+    Try
+        For Each a As SketchArc In block.Definition.SketchArcs
+            If Not a.Construction Then AddInstanceObject(block, a, profileObjects)
+        Next
+    Catch
+    End Try
+End Sub
+
+
+Private Sub AddInstanceObject( _
+    ByVal block As SketchBlock, _
+    ByVal definitionEntity As Object, _
+    ByVal profileObjects As ObjectCollection)
+
+    Try
+        Dim instanceEntity As Object = block.GetObject(definitionEntity)
+        If Not instanceEntity Is Nothing Then profileObjects.Add(instanceEntity)
+    Catch
+    End Try
+End Sub
+
+
+'====================================================
+' REFERENCE LINE HELPERS
+'====================================================
+Private Function FindHorizontalLineByLength( _
+    ByVal lines As SketchLines, _
+    ByVal targetLengthIn As Double, _
+    ByVal toleranceIn As Double, _
+    ByVal horizontalToleranceCm As Double, _
+    ByVal constructionOnly As Boolean) As SketchLine
+
+    If lines Is Nothing Then Return Nothing
+
+    Dim targetCm As Double = targetLengthIn * 2.54
+    Dim toleranceCm As Double = toleranceIn * 2.54
+    Dim best As SketchLine = Nothing
+    Dim bestDifference As Double = Double.MaxValue
+
+    For Each l As SketchLine In lines
+        Try
+            If constructionOnly AndAlso Not l.Construction Then Continue For
+
+            Dim p1 As Point2d = l.StartSketchPoint.Geometry
+            Dim p2 As Point2d = l.EndSketchPoint.Geometry
+            Dim dx As Double = p2.X - p1.X
+            Dim dy As Double = p2.Y - p1.Y
+
+            If Math.Abs(dy) > horizontalToleranceCm Then Continue For
+
+            Dim lengthCm As Double = Math.Sqrt((dx * dx) + (dy * dy))
+            Dim difference As Double = Math.Abs(lengthCm - targetCm)
+
+            If difference <= toleranceCm AndAlso difference < bestDifference Then
+                bestDifference = difference
+                best = l
+            End If
+        Catch
+        End Try
+    Next
+
+    Return best
+End Function
+
+
+Private Function FindVerticalLineByLength( _
+    ByVal lines As SketchLines, _
+    ByVal targetLengthIn As Double, _
+    ByVal toleranceIn As Double, _
+    ByVal verticalToleranceCm As Double, _
+    ByVal constructionOnly As Boolean) As SketchLine
+
+    If lines Is Nothing Then Return Nothing
+
+    Dim targetCm As Double = targetLengthIn * 2.54
+    Dim toleranceCm As Double = toleranceIn * 2.54
+    Dim best As SketchLine = Nothing
+    Dim bestDifference As Double = Double.MaxValue
+
+    For Each l As SketchLine In lines
+        Try
+            If constructionOnly AndAlso Not l.Construction Then Continue For
+
+            Dim p1 As Point2d = l.StartSketchPoint.Geometry
+            Dim p2 As Point2d = l.EndSketchPoint.Geometry
+            Dim dx As Double = p2.X - p1.X
+            Dim dy As Double = p2.Y - p1.Y
+
+            If Math.Abs(dx) > verticalToleranceCm Then Continue For
+
+            Dim lengthCm As Double = Math.Sqrt((dx * dx) + (dy * dy))
+            Dim difference As Double = Math.Abs(lengthCm - targetCm)
+
+            If difference <= toleranceCm AndAlso difference < bestDifference Then
+                bestDifference = difference
+                best = l
+            End If
+        Catch
+        End Try
+    Next
+
+    Return best
+End Function
+
+
+Private Function FindClosestHorizontalBlockLine( _
+    ByVal blocks As ObjectCollection, _
+    ByVal parentLine As SketchLine, _
+    ByVal targetLengthIn As Double, _
+    ByVal toleranceIn As Double, _
+    ByVal horizontalToleranceCm As Double) As SketchLine
+
+    Dim best As SketchLine = Nothing
+    Dim bestDistance As Double = Double.MaxValue
+    Dim parentMid As Double = GetLineMidY(parentLine)
+
+    For i As Integer = 1 To blocks.Count
+        Dim b As SketchBlock = CType(blocks.Item(i), SketchBlock)
+        Dim defLine As SketchLine = _
+            FindHorizontalLineByLength(b.Definition.SketchLines, _
+                                       targetLengthIn, toleranceIn, _
+                                       horizontalToleranceCm, True)
+
+        If defLine Is Nothing Then Continue For
+
+        Dim instanceLine As SketchLine = Nothing
+        Try
+            instanceLine = TryCast(b.GetObject(defLine), SketchLine)
+        Catch
+        End Try
+
+        If instanceLine Is Nothing Then Continue For
+
+        Dim distance As Double = Math.Abs(GetLineMidY(instanceLine) - parentMid)
+        If distance < bestDistance Then
+            bestDistance = distance
+            best = instanceLine
+        End If
+    Next
+
+    Return best
+End Function
+
+
+Private Function FindClosestVerticalBlockLine( _
+    ByVal blocks As ObjectCollection, _
+    ByVal parentLine As SketchLine, _
+    ByVal targetLengthIn As Double, _
+    ByVal toleranceIn As Double, _
+    ByVal verticalToleranceCm As Double) As SketchLine
+
+    Dim best As SketchLine = Nothing
+    Dim bestDistance As Double = Double.MaxValue
+    Dim parentMid As Double = GetLineMidX(parentLine)
+
+    For i As Integer = 1 To blocks.Count
+        Dim b As SketchBlock = CType(blocks.Item(i), SketchBlock)
+        Dim defLine As SketchLine = _
+            FindVerticalLineByLength(b.Definition.SketchLines, _
+                                     targetLengthIn, toleranceIn, _
+                                     verticalToleranceCm, True)
+
+        If defLine Is Nothing Then Continue For
+
+        Dim instanceLine As SketchLine = Nothing
+        Try
+            instanceLine = TryCast(b.GetObject(defLine), SketchLine)
+        Catch
+        End Try
+
+        If instanceLine Is Nothing Then Continue For
+
+        Dim distance As Double = Math.Abs(GetLineMidX(instanceLine) - parentMid)
+        If distance < bestDistance Then
+            bestDistance = distance
+            best = instanceLine
+        End If
+    Next
+
+    Return best
+End Function
+
+
+Private Function GetLineMidY(ByVal l As SketchLine) As Double
+    Dim p1 As Point2d = l.StartSketchPoint.Geometry
+    Dim p2 As Point2d = l.EndSketchPoint.Geometry
+    Return (p1.Y + p2.Y) / 2.0
+End Function
+
+
+Private Function GetLineMidX(ByVal l As SketchLine) As Double
+    Dim p1 As Point2d = l.StartSketchPoint.Geometry
+    Dim p2 As Point2d = l.EndSketchPoint.Geometry
+    Return (p1.X + p2.X) / 2.0
+End Function
+
+
+Private Function GetMidTextPoint( _
+    ByVal lineA As SketchLine, _
+    ByVal lineB As SketchLine, _
+    ByVal tg As TransientGeometry) As Point2d
+
+    Dim a1 As Point2d = lineA.StartSketchPoint.Geometry
+    Dim a2 As Point2d = lineA.EndSketchPoint.Geometry
+    Dim b1 As Point2d = lineB.StartSketchPoint.Geometry
+    Dim b2 As Point2d = lineB.EndSketchPoint.Geometry
+
+    Return tg.CreatePoint2d( _
+        (((a1.X + a2.X) / 2.0) + ((b1.X + b2.X) / 2.0)) / 2.0, _
+        (((a1.Y + a2.Y) / 2.0) + ((b1.Y + b2.Y) / 2.0)) / 2.0)
+End Function
+
+
+'====================================================
+' DEBUG LIST HELPERS
+'====================================================
+Private Function GetSketchNameList( _
+    ByVal sketches As PlanarSketches) As String
+
+    If sketches Is Nothing Then Return "<No sketch collection>"
+
+    Dim output As String = ""
+
+    Try
+        For Each s As PlanarSketch In sketches
+            output &= "[" & s.Name & "]" & vbCrLf
+        Next
+    Catch ex As Exception
+        output &= "<Could not enumerate sketches: " & ex.Message & ">"
+    End Try
+
+    If output = "" Then output = "<No sketches>"
+    Return output
+End Function
+
+
+Private Function GetBlockDefinitionNameList( _
+    ByVal oPartDef As PartComponentDefinition) As String
+
+    If oPartDef Is Nothing Then Return "<No component definition>"
+
+    Dim output As String = ""
+
+    Try
+        For Each d As SketchBlockDefinition In oPartDef.SketchBlockDefinitions
+            output &= "[" & d.Name & "]" & vbCrLf
+        Next
+    Catch ex As Exception
+        output &= "<Could not enumerate definitions: " & ex.Message & ">"
+    End Try
+
+    If output = "" Then output = "<No block definitions>"
+    Return output
+End Function
+
+
+'====================================================
+' COMMON HELPERS
+'====================================================
+Private Function TextEquals( _
+    ByVal firstValue As String, _
+    ByVal secondValue As String) As Boolean
+
+    If firstValue Is Nothing Then firstValue = ""
+    If secondValue Is Nothing Then secondValue = ""
+
+    Return String.Equals(Trim(firstValue), Trim(secondValue), _
+                         StringComparison.OrdinalIgnoreCase)
+End Function
+
+
+Private Sub UpdatePart(ByVal oPartDoc As PartDocument)
+    If oPartDoc Is Nothing Then
+        Throw New Exception("UpdatePart received an invalid PartDocument.")
+    End If
+
+    Dim firstError As Exception = Nothing
+
+    Try
+        If oPartDoc.Update2(True) Then Exit Sub
+        firstError = New Exception("Inventor Update2 returned False.")
+    Catch ex As Exception
+        firstError = ex
+    End Try
+
+    Try
+        oPartDoc.Update()
+    Catch ex As Exception
+        Throw New Exception("Inventor could not update the part." & _
+                            vbCrLf & vbCrLf & _
+                            "Update2: " & firstError.Message & _
+                            vbCrLf & vbCrLf & _
+                            "Update: " & ex.Message)
+    End Try
+End Sub

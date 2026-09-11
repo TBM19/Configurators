@@ -1,0 +1,107 @@
+﻿Sub Main()
+
+    Dim targetState As String = ""
+    Dim phantomOccName As String = ""
+
+    '--------------------------------------------
+    ' READ CC FROM CURRENT DOCUMENT
+    '--------------------------------------------
+    Dim ccValue As Double = CDbl(Parameter("CC"))
+
+    If Math.Abs(ccValue - 5) < 0.001 Then
+
+        targetState = "5.0 inch CC"
+
+    ElseIf Math.Abs(ccValue - 10) < 0.001 Then
+
+        targetState = "10.0 inch CC"
+
+    Else
+
+        Exit Sub
+
+    End If
+
+    '--------------------------------------------
+    ' FIND FIRST PHANTOM TIE TUBES ANYWHERE
+    '--------------------------------------------
+    FindFirstPhantomTieTubes( _
+        CType(ThisDoc.Document, AssemblyDocument). _
+        ComponentDefinition.Occurrences, _
+        phantomOccName)
+
+    If phantomOccName = "" Then Exit Sub
+
+    '--------------------------------------------
+    ' CHANGE MODEL STATE
+    '--------------------------------------------
+    Try
+
+        Component.ActiveModelState(phantomOccName) = targetState
+
+        InventorVb.DocumentUpdate()
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Found PHANTOM TIE TUBES but model state '" & _
+            targetState & "' does not exist." & vbCrLf & vbCrLf & _
+            ex.Message, _
+            "Model State Error")
+
+    End Try
+
+End Sub
+
+
+Private Sub FindFirstPhantomTieTubes( _
+    ByVal occs As ComponentOccurrences, _
+    ByRef phantomOccName As String)
+
+    For Each occ As ComponentOccurrence In occs
+
+        If phantomOccName <> "" Then Exit Sub
+
+        Try
+
+            If UCase(Trim(GetTitle(occ))) = _
+                "PHANTOM TIE TUBES" Then
+
+                phantomOccName = occ.Name
+                Exit Sub
+
+            End If
+
+            If occ.SubOccurrences.Count > 0 Then
+
+                FindFirstPhantomTieTubes( _
+                    occ.SubOccurrences, _
+                    phantomOccName)
+
+            End If
+
+        Catch
+        End Try
+
+    Next
+
+End Sub
+
+
+Private Function GetTitle( _
+    ByVal occ As ComponentOccurrence) As String
+
+    Try
+
+        Return CStr( _
+            occ.Definition.Document.PropertySets( _
+            "Inventor Summary Information") _
+            .Item("Title").Value)
+
+    Catch
+
+        Return ""
+
+    End Try
+
+End Function

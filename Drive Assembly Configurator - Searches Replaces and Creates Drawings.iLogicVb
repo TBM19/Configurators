@@ -1,0 +1,3380 @@
+﻿'====================================================
+' DRIVE ASSEMBLY CONFIGURATOR
+' SEARCH / REPLACE / CREATE DRAWINGS
+'====================================================
+'
+' Responsibilities:
+'   1. Search Vault for matching existing components.
+'   2. Store found Part Numbers in SharedVariables.
+'   3. Store found file paths in SharedVariables.
+'   4. Leave description SharedVariables alone.
+'   5. Create new files only when no Vault match exists and user supplied a new PN/path.
+'   6. Write generated descriptions into NEW files only.
+'   7. Replace matching occurrences by Title.
+'   8. Create drawings for configured parts when needed.
+'
+' Important:
+'   - This rule does NOT own DriveConfig_DESC_* values.
+'   - The description rule owns DriveConfig_DESC_*.
+'   - Existing Vault files keep their existing Description iProperty.
+'   - New files get Description from DriveConfig_DESC_*.
+'
+' RX2 special case:
+'   - RX2 uses 5.0 in CC for Drive Frame related components:
+'       DRIVE FRAME
+'       CYLINDER MOUNT
+'       CYLINDER MOUNT ASSY
+'       STIFFENER
+'		CROSSMEMBER
+'
+'====================================================
+
+Sub Main()
+
+    '====================================================
+    ' DOCUMENT SAFETY
+    '====================================================
+    If ThisDoc.Document.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        MsgBox("This rule must be run from the top-level drive assembly.", vbCritical, "Drive Configurator")
+        Exit Sub
+    End If
+
+    Dim oDoc As AssemblyDocument = CType(ThisDoc.Document, AssemblyDocument)
+
+    '====================================================
+    ' RESET SEARCH RESULT VALUES ONLY
+    '====================================================
+    ResetSearchResultSharedVariables()
+
+	'====================================================
+	' LIVE SEARCH ONLY FLAG
+	'====================================================
+	Dim liveSearchOnly As Boolean = False
+	
+	Try
+	
+	    If SharedVariable.Exists("DriveConfig_LiveSearchOnly") Then
+	
+	        liveSearchOnly = _
+	            CBool(SharedVariable("DriveConfig_LiveSearchOnly"))
+	
+	    End If
+	
+	Catch
+	
+	    liveSearchOnly = False
+	
+	End Try
+
+    '====================================================
+    ' READ CONFIGURATION VALUES
+    '====================================================
+    Dim p As New System.Collections.Generic.Dictionary(Of String, String)
+
+    p.Add("System", SafeiProp("System"))
+    p.Add("Controls", SafeiProp("Controls"))
+    p.Add("Valve_Mount_Style", SafeiProp("Valve_Mount_Style"))
+    p.Add("Bore_Size", SafeiProp("Bore_Size"))
+    p.Add("Stroke_Length", SafeiProp("Stroke_Length"))
+    p.Add("CC", SafeiProp("CC"))
+    p.Add("Shoe_Style", SafeiProp("Shoe_Style"))
+    p.Add("SC", SafeiProp("SC"))
+    p.Add("Quantity_of_Shoes", SafeiProp("Quantity_of_Shoes"))
+    p.Add("Drive_Frame_Style", SafeiProp("Drive_Frame_Style"))
+    p.Add("Drive_Frame_Gap", SafeiProp("Drive_Frame_Gap"))
+    p.Add("Outside_Dimension", SafeiProp("Outside_Dimension"))
+    p.Add("Inside_Dimension", SafeiProp("Inside_Dimension"))
+    p.Add("Crossmember_Material", SafeiProp("Crossmember_Material"))
+    p.Add("Crossmember_Height", SafeiProp("Crossmember_Height"))
+    p.Add("Crossmember_Width", SafeiProp("Crossmember_Width"))
+    p.Add("Finish", SafeiProp("Finish"))
+    p.Add("Customer", SafeiProp("Customer"))
+    p.Add("Customer_Crossmember_Height", SafeiProp("Customer_Crossmember_Height"))
+    p.Add("Subframe", SafeiProp("Subframe"))
+    p.Add("Subframe_Width", SafeiProp("Subframe_Width"))
+
+    '====================================================
+    ' LIVE SEARCH MODE
+    '====================================================
+    If liveSearchOnly Then
+        RunLiveSearch(p)
+        Exit Sub
+    End If
+
+    '====================================================
+    ' FULL CONFIGURATOR RUN
+    '====================================================
+    RunFullConfigurator(oDoc, p)
+
+End Sub
+
+
+'====================================================
+' LIVE SEARCH
+'====================================================
+' Finds existing Vault files and stores:
+'   DriveConfig_PN_*
+'   DriveConfig_FILE_*
+'
+' If no Vault match is found:
+'   DriveConfig_PN_* is blank.
+'   DriveConfig_FILE_* is blank.
+'
+' Descriptions are not touched here.
+'====================================================
+Sub RunLiveSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String))
+
+    LiveSearchOne("DRIVE CORE", BuildDriveCoreSearch(p))
+    LiveSearchOne("CROSS DRIVE SET", BuildCrossDriveSetSearch(p))
+    LiveSearchOne("UPPER CROSS DRIVE SUPPORT", BuildUpperSupportSearch(p))
+    LiveSearchOne("SERIAL PLATE", BuildSerialPlateSearch(p))
+
+    LiveSearchOne("DRIVE ASSEMBLY", BuildDriveAssySearch(p))
+    LiveSearchOne("CROSSMEMBER", BuildCrossmemberSearch(p))
+    LiveSearchOne("DRIVE FRAME", BuildDriveFrameSearch(p))
+    LiveSearchOne("CYLINDER MOUNT", BuildCylinderMountSearch(p))
+
+    If Trim(GetBestInitialSourceFile("CYLINDER MOUNT ASSEMBLY", "", False)) = "" Then
+        StoreConfiguratorComponentPartNumber("CYLINDER MOUNT ASSEMBLY", "NOT PLACED")
+        StoreConfiguratorComponentFilePath("CYLINDER MOUNT ASSEMBLY", "")
+    Else
+        LiveSearchOne("CYLINDER MOUNT ASSEMBLY", BuildCylinderMountAssySearch(p))
+    End If
+
+    If Trim(GetBestInitialSourceFile("STIFFENER", "", False)) = "" Then
+        StoreConfiguratorComponentPartNumber("STIFFENER", "NOT PLACED")
+        StoreConfiguratorComponentFilePath("STIFFENER", "")
+    Else
+        LiveSearchOne("STIFFENER", BuildStiffenerSearch(p))
+    End If
+
+End Sub
+
+
+
+'========================================
+' Live Search
+'========================================
+
+
+Sub LiveSearchOne( _
+    ByVal componentName As String, _
+    ByVal searchCriteria As System.Collections.Generic.Dictionary(Of String, String))
+
+    Try
+
+        If Trim(GetMissingCriteriaText(searchCriteria)) <> "" Then
+            StoreConfiguratorComponentPartNumber(componentName, "")
+            StoreConfiguratorComponentFilePath(componentName, "")
+            Exit Sub
+        End If
+
+        Dim foundFile As String = GetFileBySearchCriteriaWithWildcards(searchCriteria)
+
+        If Trim(foundFile) = "" Then
+            StoreConfiguratorComponentPartNumber(componentName, "")
+            StoreConfiguratorComponentFilePath(componentName, "")
+            Exit Sub
+        End If
+
+        StoreFoundVaultFile(componentName, foundFile)
+
+    Catch
+
+        StoreConfiguratorComponentPartNumber(componentName, "")
+        StoreConfiguratorComponentFilePath(componentName, "")
+
+    End Try
+
+End Sub
+
+
+'====================================================
+' FULL CONFIGURATOR RUN
+'====================================================
+Sub RunFullConfigurator( _
+    ByVal oDoc As AssemblyDocument, _
+    ByVal p As System.Collections.Generic.Dictionary(Of String, String))
+
+    Dim swapReport As String = "Part Swaps" & vbCrLf & vbCrLf
+    Dim anySwap As Boolean = False
+
+    '====================================================
+    ' REQUIRED COMPONENT CHECK
+    '====================================================
+    Dim missingRequired As String = ""
+
+    CheckRequiredComponentExists("PHANTOM CONTROLS ASSEMBLY", BuildControlsSearch(p), missingRequired)
+    CheckRequiredComponentExists("CROSS DRIVE SET", BuildCrossDriveSetSearch(p), missingRequired)
+    CheckRequiredComponentExists("DRIVE CORE", BuildDriveCoreSearch(p), missingRequired)
+    CheckRequiredComponentExists("SERIAL PLATE", BuildSerialPlateSearch(p), missingRequired)
+    CheckRequiredComponentExists("UPPER CROSS DRIVE SUPPORT", BuildUpperSupportSearch(p), missingRequired)
+    CheckRequiredComponentExists("PHANTOM VALVE MOUNTS", BuildValveMountsSearch(p), missingRequired)
+    CheckRequiredComponentExists("PHANTOM TIE TUBES", BuildPhantomTieTubesSearch(p), missingRequired)
+
+    If Trim(missingRequired) <> "" Then
+
+        SetStopFlag( _
+            "Required Vault components are missing or could not be searched:" & vbCrLf & vbCrLf & _
+            missingRequired)
+
+        MsgBox( _
+            "Configurator stopped." & vbCrLf & vbCrLf & _
+            "The following required components are missing or could not be searched:" & vbCrLf & vbCrLf & _
+            missingRequired & vbCrLf & vbCrLf & _
+            "No new DRIVE ASSEMBLY number was requested.", _
+            vbCritical, _
+            "Required Components Missing")
+
+        Exit Sub
+
+    End If
+
+    '====================================================
+    ' CHECK FOR EXISTING DRIVE ASSY
+    '====================================================
+    Dim existingDriveAssy As String = GetFileBySearchCriteriaWithWildcards(BuildDriveAssySearch(p))
+
+    If Trim(existingDriveAssy) <> "" Then
+
+        StoreFoundVaultFile("DRIVE ASSEMBLY", existingDriveAssy)
+
+        SetStopFlag("DRIVE ASSEMBLY : Existing matching drive assembly was found. Configurator stopped.")
+
+        MsgBox( _
+            "An existing DRIVE ASSEMBLY was found." & vbCrLf & vbCrLf & _
+            "Part Number: " & GetPartNumber(existingDriveAssy) & vbCrLf & _
+            "File: " & existingDriveAssy, _
+            vbInformation, _
+            "Existing Drive Assembly Found")
+
+        Exit Sub
+
+    End If
+
+	'====================================================
+	' CAPTURE SOURCE FILES BEFORE REPLACEMENT
+	'
+	' Only capture source files that exist in the starting
+	' assembly before the Drive Frame is replaced.
+	'
+	' Parts inside the final/new Drive Frame are captured
+	' later AFTER the Drive Frame swap.
+	'====================================================
+	Dim srcControls As String = GetBestInitialSourceFile("PHANTOM CONTROLS ASSEMBLY", "", False)
+	Dim srcCrossDriveSet As String = GetBestInitialSourceFile("CROSS DRIVE SET", "", False)
+	Dim srcDriveCore As String = GetBestInitialSourceFile("DRIVE CORE", "", False)
+	Dim srcLowerSupports As String = GetBestInitialSourceFile("LOWER CROSS DRIVE SUPPORT", "", False)
+	Dim srcSerialPlate As String = GetBestInitialSourceFile("SERIAL PLATE", "", False)
+	Dim srcUpperSupport As String = GetBestInitialSourceFile("UPPER CROSS DRIVE SUPPORT", "", False)
+	Dim srcValveMounts As String = GetBestInitialSourceFile("PHANTOM VALVE MOUNTS", "", False)
+	
+	Dim srcDriveFrame As String = GetBestInitialSourceFile("DRIVE FRAME", "", False)
+	Dim srcCrossmember As String = GetBestInitialSourceFile("CROSSMEMBER", "", False)
+	
+	'These will be re-captured after DRIVE FRAME is replaced.
+	Dim srcPhantomTieTubes As String = ""
+	Dim srcCylinderMount As String = ""
+	Dim srcStiffener As String = ""
+	Dim srcCylinderMountAssy As String = ""
+	Dim srcReinforcementPlate As String = ""
+
+	'====================================================
+	' SAVE TOP LEVEL DRIVE ASSY
+	'
+	' Capture the original DRIVE ASSY file before Save Copy As.
+	' This original file is used later as the drawing template source.
+	'====================================================
+	Dim srcDriveAssyTemplateSource As String = ""
+	
+	Try
+	    srcDriveAssyTemplateSource = oDoc.FullFileName
+	Catch
+	    srcDriveAssyTemplateSource = ""
+	End Try
+	
+	'====================================================
+	' GET NEW DRIVE ASSEMBLY PART NUMBER FROM FORM ONLY
+	'====================================================
+	Dim newDriveAssyPN As String = GetNewPartInputPN("DRIVE ASSEMBLY")
+	
+	If Trim(newDriveAssyPN) = "" Then
+	    SetStopFlag("DRIVE ASSEMBLY : No form New PN was provided. Configurator cancelled.")
+	    MsgBox( _
+	        "No DRIVE ASSEMBLY New PN was provided from the form." & vbCrLf & vbCrLf & _
+	        "Enter a Part Number for DRIVE ASSEMBLY in the configurator form before running.", _
+	        vbExclamation, _
+	        "Drive Assembly PN Missing")
+	    Exit Sub
+	End If
+
+	Dim newDriveAssyFile As String = ""
+	Dim newDriveAssyDoc As AssemblyDocument = Nothing
+	
+	If SaveCurrentAssemblyAsNewDriveAssy(oDoc, newDriveAssyPN, swapReport, newDriveAssyFile, newDriveAssyDoc) = False Then
+	    SetStopFlag("DRIVE ASSEMBLY : Top-level drive assembly Save As was cancelled or failed. Configurator cancelled.")
+	    MsgBox("Top-level DRIVE ASSEMBLY Save As was cancelled or failed. Rule cancelled.", vbExclamation, "Rule Cancelled")
+	    Exit Sub
+	End If
+	
+	If newDriveAssyDoc Is Nothing Then
+	    MsgBox("The new DRIVE ASSEMBLY was created, but Inventor could not open it as the working assembly." & vbCrLf & vbCrLf & _
+	           newDriveAssyFile, vbCritical, "Drive Configurator")
+	    Exit Sub
+	End If
+	
+	'From this point forward, oDoc must be the NEW copied DRIVE ASSY.
+	oDoc = newDriveAssyDoc
+	
+	Try
+	    oDoc.Activate()
+	Catch
+	End Try
+	
+
+    '====================================================
+    ' REQUIRED COMPONENT REPLACEMENTS
+    '====================================================
+	ReplaceComponentByCriteria(oDoc, "PHANTOM CONTROLS ASSEMBLY", BuildControlsSearch(p), srcControls, swapReport, anySwap)
+	ReplaceComponentByCriteria(oDoc, "CROSS DRIVE SET", BuildCrossDriveSetSearch(p), srcCrossDriveSet, swapReport, anySwap)
+	ReplaceComponentByCriteria(oDoc, "DRIVE CORE", BuildDriveCoreSearch(p), srcDriveCore, swapReport, anySwap)
+	ReplaceComponentByCriteria(oDoc, "SERIAL PLATE", BuildSerialPlateSearch(p), srcSerialPlate, swapReport, anySwap)
+	ReplaceComponentByCriteria(oDoc, "UPPER CROSS DRIVE SUPPORT", BuildUpperSupportSearch(p), srcUpperSupport, swapReport, anySwap)
+	ReplaceComponentByCriteria(oDoc, "PHANTOM VALVE MOUNTS", BuildValveMountsSearch(p), srcValveMounts, swapReport, anySwap)
+
+
+	'====================================================
+	' OPTIONAL / CONFIGURATION COMPONENTS
+	'====================================================
+	ReplaceOptionalComponent(oDoc, "LOWER CROSS DRIVE SUPPORT", BuildLowerSupportsSearch(p), srcLowerSupports, swapReport, anySwap)
+	
+	'====================================================
+	' DRIVE FRAME
+	'
+	' Replace the Drive Frame first.
+	' Everything below this point searches the final/new
+	' assembly structure, just like the Push Parameters rule.
+	'====================================================
+	ReplaceOptionalComponent(oDoc, "DRIVE FRAME", BuildDriveFrameSearch(p), srcDriveFrame, swapReport, anySwap)
+	
+	
+	'====================================================
+	' RE-CAPTURE CURRENT FILES AFTER DRIVE FRAME SWAP
+	'
+	' Safe method:
+	'   1. DRIVE FRAME is handled first.
+	'   2. CYLINDER MOUNT ASSY is handled second.
+	'   3. CYLINDER MOUNT is handled third.
+	'   4. STIFFENER is handled fourth.
+	'
+	' This still uses the existing recursive replace-all logic,
+	' but it does not open/edit newly created subassemblies directly.
+	'====================================================
+	
+	srcPhantomTieTubes = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "PHANTOM TIE TUBES")
+	srcCylinderMountAssy = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "CYLINDER MOUNT ASSEMBLY")
+	srcCylinderMount = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "CYLINDER MOUNT")
+	srcStiffener = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "STIFFENER")
+	srcCrossmember = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "CROSSMEMBER")
+	srcReinforcementPlate = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "REINFORCEMENT PLATE")
+	
+	
+	'====================================================
+	' PHANTOM TIE TUBES
+	'====================================================
+	If Trim(srcPhantomTieTubes) = "" Then
+	
+	    swapReport &= "PHANTOM TIE TUBES : Not currently placed - skipped" & vbCrLf
+	
+	Else
+	
+	    ReplaceComponentByCriteria( _
+	        oDoc, _
+	        "PHANTOM TIE TUBES", _
+	        BuildPhantomTieTubesSearch(p), _
+	        srcPhantomTieTubes, _
+	        swapReport, _
+	        anySwap)
+	
+	End If
+	
+	
+	'====================================================
+	' CYLINDER MOUNT ASSY
+	'
+	' Must happen before CYLINDER MOUNT and STIFFENER.
+	'====================================================
+	If Trim(srcCylinderMountAssy) = "" Then
+	
+	    StoreConfiguratorComponentPartNumber("CYLINDER MOUNT ASSEMBLY", "NOT PLACED")
+	    StoreConfiguratorComponentFilePath("CYLINDER MOUNT ASSEMBLY", "")
+	    swapReport &= "CYLINDER MOUNT ASSEMBLY : Not currently placed - skipped" & vbCrLf
+	
+	Else
+	
+	    ReplaceComponentByCriteria( _
+	        oDoc, _
+	        "CYLINDER MOUNT ASSEMBLY", _
+	        BuildCylinderMountAssySearch(p), _
+	        srcCylinderMountAssy, _
+	        swapReport, _
+	        anySwap)
+	
+	End If
+	
+	
+	'====================================================
+	' RE-CAPTURE AFTER CYLINDER MOUNT ASSY REPLACE
+	'
+	' This lets CYLINDER MOUNT and STIFFENER be found inside
+	' the newly replaced or newly created CYLINDER MOUNT ASSY.
+	'====================================================
+	srcCylinderMount = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "CYLINDER MOUNT")
+	srcStiffener = FindFirstOccurrenceFileByTitle(oDoc.ComponentDefinition.Occurrences, "STIFFENER")
+	
+	
+	'====================================================
+	' CYLINDER MOUNT
+	'====================================================
+	If Trim(srcCylinderMount) = "" Then
+	
+	    StoreConfiguratorComponentPartNumber("CYLINDER MOUNT", "NOT PLACED")
+	    StoreConfiguratorComponentFilePath("CYLINDER MOUNT", "")
+	    swapReport &= "CYLINDER MOUNT : Not currently placed - skipped" & vbCrLf
+	
+	Else
+	
+	    ReplaceComponentByCriteria( _
+	        oDoc, _
+	        "CYLINDER MOUNT", _
+	        BuildCylinderMountSearch(p), _
+	        srcCylinderMount, _
+	        swapReport, _
+	        anySwap)
+	
+	End If
+	
+	
+	'====================================================
+	' STIFFENER
+	'====================================================
+	If Trim(srcStiffener) = "" Then
+	
+	    StoreConfiguratorComponentPartNumber("STIFFENER", "NOT PLACED")
+	    StoreConfiguratorComponentFilePath("STIFFENER", "")
+	    swapReport &= "STIFFENER : Not currently placed - skipped" & vbCrLf
+	
+	Else
+	
+	    ReplaceComponentByCriteria( _
+	        oDoc, _
+	        "STIFFENER", _
+	        BuildStiffenerSearch(p), _
+	        srcStiffener, _
+	        swapReport, _
+	        anySwap)
+	
+	End If
+	
+	
+	'====================================================
+	' CROSSMEMBER
+	'
+	' Still handled from the top-level copied DRIVE ASSY.
+	'====================================================
+	ReplaceOptionalComponent(oDoc, "CROSSMEMBER", BuildCrossmemberSearch(p), srcCrossmember, swapReport, anySwap)
+	
+	
+	'====================================================
+	' REINFORCEMENT PLATE
+	'
+	' Still handled from the top-level copied DRIVE ASSY.
+	'====================================================
+	If Trim(srcReinforcementPlate) = "" Then
+	
+	    swapReport &= "REINFORCEMENT PLATE : Not currently placed - skipped" & vbCrLf
+	
+	Else
+	
+	    ReplaceComponentByCriteria( _
+	        oDoc, _
+	        "REINFORCEMENT PLATE", _
+	        BuildReinforcementPlateSearch(p), _
+	        srcReinforcementPlate, _
+	        swapReport, _
+	        anySwap)
+	
+	End If
+	
+'====================================================
+' FINAL SAVE BEFORE OPENING CREATED FILES
+'
+' Commit all replacement/reference changes first.
+'====================================================
+Try
+    oDoc.Update2(True)
+Catch
+    Try
+        oDoc.Update()
+    Catch
+    End Try
+End Try
+
+Try
+    oDoc.Save2(True)
+Catch
+    Try
+        oDoc.Save()
+    Catch
+    End Try
+End Try
+
+
+
+'====================================================
+' PUSH PARAMETERS BEFORE OPENING CREATED FILES
+'
+' The new top-level DRIVE ASSEMBLY must be active
+' because the Push Parameters rule starts from
+' ThisDoc.Document.
+'====================================================
+Try
+
+    oDoc.Activate()
+
+    iLogicVb.Automation.RunExternalRule( _
+        oDoc, _
+        "Push Parameters")
+
+    swapReport &= _
+        "PARAMETERS : Push Parameters completed." & _
+        vbCrLf
+
+Catch ex As Exception
+
+    swapReport &= _
+        "PARAMETERS : Push Parameters failed - " & _
+        ex.Message & _
+        vbCrLf
+
+End Try
+
+
+'====================================================
+' OPEN CREATED FILES AND WRITE PROPERTIES
+'
+' This happens AFTER parameters have been pushed.
+' Every newly created model is saved and left open.
+'====================================================
+Try
+
+    ProcessCreatedPropertyTasks(swapReport)
+
+Catch ex As Exception
+
+    swapReport &= _
+        "PROPERTIES : Created file processing failed - " & _
+        ex.Message & _
+        vbCrLf
+
+End Try
+
+'====================================================
+' CREATE DRAWINGS AFTER REPLACEMENTS AND PROPERTIES
+'
+' Models are now created, replaced, opened, updated,
+' and have correct Part Number / Description values.
+'====================================================
+Try
+    CreateDriveGeneratorDrawing(oDoc, "DRIVE ASSEMBLY", swapReport, srcDriveAssyTemplateSource)
+Catch ex As Exception
+    swapReport &= "DRAWING : DRIVE ASSEMBLY failed - " & ex.Message & vbCrLf
+End Try
+
+Try
+    ProcessCreatedDrawingTasks(swapReport)
+Catch ex As Exception
+    swapReport &= "DRAWING : Created child drawing processing failed - " & ex.Message & vbCrLf
+End Try
+
+'====================================================
+' FINAL OPEN OF ALL CREATED MODEL FILES
+'
+' Run after parameter updates, property writes, and
+' drawing creation. This guarantees each created model
+' has a visible Inventor document tab and remains open.
+'====================================================
+Try
+
+    OpenAllCreatedFilesAndKeepOpen(swapReport)
+
+Catch ex As Exception
+
+    swapReport &= _
+        "OPEN FILES : Final open-all operation failed - " & _
+        ex.Message & _
+        vbCrLf
+
+End Try
+
+
+'====================================================
+' FINAL SAVE AFTER DRAWING CREATION
+' Forces Inventor/Vault to see final reference state.
+'====================================================
+
+
+'Try
+'    oDoc.Rebuild2()
+'Catch
+'End Try
+
+Try
+    oDoc.Update2(True)
+Catch
+    Try
+        oDoc.Update()
+    Catch
+    End Try
+End Try
+
+Try
+    oDoc.Save2(True)
+Catch
+    Try
+        oDoc.Save()
+    Catch
+    End Try
+End Try
+
+Try
+    ThisApplication.ActiveView.Update()
+Catch
+End Try
+
+
+''====================================================
+' MAKE NEW DRIVE ASSY ACTIVE FOR VAULT CHECK-IN
+'
+' Created child files are intentionally left open by
+' SaveAsCore().
+'
+' This activates the new top-level DRIVE ASSY at the end
+' so the user is returned to the main assembly for review
+' and Vault check-in.
+'====================================================
+Try
+    ActivateDocumentForVault(oDoc)
+Catch
+End Try
+
+
+MsgBox(swapReport, vbOKOnly + vbInformation, "Swap Results")
+
+End Sub
+
+
+'====================================================
+' SEARCH CRITERIA BUILDERS
+'====================================================
+Function NewCriteria() As System.Collections.Generic.Dictionary(Of String, String)
+
+    Dim d As New System.Collections.Generic.Dictionary(Of String, String)
+
+    'Every Vault search created by this rule is restricted
+    'to files assigned to the MOBILE Vault category.
+    d.Add("Category Name", "MOBILE")
+
+    Return d
+
+End Function
+
+
+Sub AddCriteria( _
+    ByVal d As System.Collections.Generic.Dictionary(Of String, String), _
+    ByVal key As String, _
+    ByVal value As String)
+
+    d.Add(key, value)
+
+End Sub
+
+
+Function GetSearchCC( _
+    ByVal p As System.Collections.Generic.Dictionary(Of String, String), _
+    ByVal componentTitle As String) As String
+
+    Dim systemValue As String = UCase(Trim(GetP(p, "System")))
+    Dim titleValue As String = UCase(Trim(componentTitle))
+
+    If systemValue = "RX2" Then
+
+        Select Case titleValue
+
+			Case "PHANTOM CONTROLS ASSEMBLY", _
+				 "DRIVE FRAME", _
+			     "CYLINDER MOUNT", _
+			     "CYLINDER MOUNT ASSEMBLY", _
+			     "STIFFENER", _
+			     "CROSSMEMBER", _
+			     "REINFORCEMENT PLATE"
+			
+			    Return "5.0 in"
+
+        End Select
+
+    End If
+
+    Return GetP(p, "CC")
+
+End Function
+
+
+
+Function BuildControlsSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "PHANTOM CONTROLS ASSEMBLY")
+    AddCriteria(d, "Controls", GetP(p, "Controls"))
+	AddCriteria(d, "Valve Mount Style", GetP(p, "Valve_Mount_Style"))
+	AddCriteria(d, "CC", GetP(p, "CC"))
+    Return d
+End Function
+
+
+Function BuildCrossDriveSetSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "CROSS DRIVE SET")
+    AddCriteria(d, "System", GetP(p, "System"))
+    AddCriteria(d, "Bore Size", GetP(p, "Bore_Size"))
+    AddCriteria(d, "CC", GetP(p, "CC"))
+    AddCriteria(d, "Shoe Style", GetP(p, "Shoe_Style"))
+    AddCriteria(d, "SC", GetP(p, "SC"))
+    AddCriteria(d, "Quantity of Shoes", GetP(p, "Quantity_of_Shoes"))
+    AddCriteria(d, "Finish", GetP(p, "Finish"))
+    Return d
+End Function
+
+
+Function BuildDriveCoreSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "DRIVE CORE")
+    AddCriteria(d, "System", GetP(p, "System"))
+    AddCriteria(d, "Valve Mount Style", GetP(p, "Valve_Mount_Style"))
+    AddCriteria(d, "Bore Size", GetP(p, "Bore_Size"))
+    AddCriteria(d, "CC", GetP(p, "CC"))
+    AddCriteria(d, "Stroke Length", GetP(p, "Stroke_Length"))
+    Return d
+End Function
+
+
+Function BuildSerialPlateSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "SERIAL PLATE")
+    AddCriteria(d, "System", GetP(p, "System"))
+    AddCriteria(d, "Bore Size", GetP(p, "Bore_Size"))
+    Return d
+End Function
+
+
+Function BuildUpperSupportSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "UPPER CROSS DRIVE SUPPORT")
+    AddCriteria(d, "Bore Size", GetP(p, "Bore_Size"))
+    AddCriteria(d, "SC", GetP(p, "SC"))
+    AddCriteria(d, "Finish", GetP(p, "Finish"))
+    Return d
+End Function
+
+
+Function BuildValveMountsSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "PHANTOM VALVE MOUNTS")
+    AddCriteria(d, "Finish", GetP(p, "Finish"))
+	AddCriteria(d, "Valve Mount Style", GetP(p, "Valve_Mount_Style"))
+    Return d
+End Function
+
+
+Function BuildPhantomTieTubesSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "PHANTOM TIE TUBES")
+    AddCriteria(d, "Valve Mount Style", GetP(p, "Valve_Mount_Style"))
+    AddCriteria(d, "Drive Frame Gap", GetP(p, "Drive_Frame_Gap"))
+    AddCriteria(d, "Finish", GetP(p, "Finish"))
+    Return d
+End Function
+
+
+Function BuildDriveAssySearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "DRIVE ASSEMBLY")
+    AddCriteria(d, "System", GetP(p, "System"))
+    AddCriteria(d, "Controls", GetP(p, "Controls"))
+    AddCriteria(d, "Valve Mount Style", GetP(p, "Valve_Mount_Style"))
+    AddCriteria(d, "Bore Size", GetP(p, "Bore_Size"))
+    AddCriteria(d, "Stroke Length", GetP(p, "Stroke_Length"))
+    AddCriteria(d, "CC", GetP(p, "CC"))
+    AddCriteria(d, "Shoe Style", GetP(p, "Shoe_Style"))
+    AddCriteria(d, "SC", GetP(p, "SC"))
+    AddCriteria(d, "Quantity of Shoes", GetP(p, "Quantity_of_Shoes"))
+    AddCriteria(d, "Drive Frame Style", GetP(p, "Drive_Frame_Style"))
+    AddCriteria(d, "Drive Frame Gap", GetP(p, "Drive_Frame_Gap"))
+    AddCriteria(d, "Outside Dimension", GetP(p, "Outside_Dimension"))
+    AddCriteria(d, "Inside Dimension", GetP(p, "Inside_Dimension"))
+    AddCriteria(d, "Crossmember Material", GetP(p, "Crossmember_Material"))
+    AddCriteria(d, "Crossmember Height", GetP(p, "Crossmember_Height"))
+    AddCriteria(d, "Crossmember Width", GetP(p, "Crossmember_Width"))
+    AddCriteria(d, "Finish", GetP(p, "Finish"))
+    AddCriteria(d, "Customer", GetP(p, "Customer"))
+    'AddCriteria(d, "Customer Crossmember Height", GetP(p, "Customer_Crossmember_Height"))
+    'AddCriteria(d, "Subframe", GetP(p, "Subframe"))
+    'AddCriteria(d, "Subframe Width", GetP(p, "Subframe_Width"))
+    Return d
+End Function
+
+
+Function BuildCrossmemberSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+
+    Dim d = NewCriteria()
+
+    AddCriteria(d, "Title", "CROSSMEMBER")
+    AddCriteria(d, "Crossmember Material", GetP(p, "Crossmember_Material"))
+    AddCriteria(d, "Crossmember Height", GetP(p, "Crossmember_Height"))
+    AddCriteria(d, "Crossmember Width", GetP(p, "Crossmember_Width"))
+
+    'RX2 special case:
+    'If System = RX2, this searches 5.0 in instead of the top-level CC.
+    AddCriteria(d, "CC", GetSearchCC(p, "CROSSMEMBER"))
+
+    Return d
+
+End Function
+
+
+Function BuildDriveFrameSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "DRIVE FRAME")
+    AddCriteria(d, "Drive Frame Style", GetP(p, "Drive_Frame_Style"))
+    AddCriteria(d, "Drive Frame Gap", GetP(p, "Drive_Frame_Gap"))
+    AddCriteria(d, "Outside Dimension", GetP(p, "Outside_Dimension"))
+    AddCriteria(d, "Inside Dimension", GetP(p, "Inside_Dimension"))
+    AddCriteria(d, "Finish", GetP(p, "Finish"))
+    AddCriteria(d, "CC", GetSearchCC(p, "DRIVE FRAME"))
+	AddCriteria(d, "Valve Mount Style", GetP(p, "Valve_Mount_Style"))
+	AddCriteria(d, "Customer", GetP(p, "Customer"))
+    Return d
+End Function
+
+
+Function BuildCylinderMountSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "CYLINDER MOUNT")
+	AddCriteria(d, "Drive Frame Style", GetP(p, "Drive_Frame_Style"))
+    AddCriteria(d, "Outside Dimension", GetP(p, "Outside_Dimension"))
+    AddCriteria(d, "Inside Dimension", GetP(p, "Inside_Dimension"))
+    AddCriteria(d, "CC", GetSearchCC(p, "CYLINDER MOUNT"))
+	AddCriteria(d, "Customer", GetP(p, "Customer"))
+    Return d
+End Function
+
+
+Function BuildCylinderMountAssySearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "CYLINDER MOUNT ASSEMBLY")
+	AddCriteria(d, "Drive Frame Style", GetP(p, "Drive_Frame_Style"))
+    AddCriteria(d, "Outside Dimension", GetP(p, "Outside_Dimension"))
+    AddCriteria(d, "Inside Dimension", GetP(p, "Inside_Dimension"))
+    AddCriteria(d, "CC", GetSearchCC(p, "CYLINDER MOUNT ASSEMBLY"))
+	AddCriteria(d, "Customer", GetP(p, "Customer"))
+	AddCriteria(d, "Finish", GetP(p, "Finish"))
+    Return d
+End Function
+
+
+Function BuildStiffenerSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "STIFFENER")
+    AddCriteria(d, "Drive Frame Style", GetP(p, "Drive_Frame_Style"))
+	AddCriteria(d, "Outside Dimension", GetP(p, "Outside_Dimension"))
+    AddCriteria(d, "Inside Dimension", GetP(p, "Inside_Dimension"))
+    AddCriteria(d, "CC", GetSearchCC(p, "STIFFENER"))
+	AddCriteria(d, "Crossmember Height", GetP(p, "Crossmember_Height"))
+	AddCriteria(d, "Customer", GetP(p, "Customer"))
+    Return d
+End Function
+
+
+Function BuildLowerSupportsSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+    Dim d = NewCriteria()
+    AddCriteria(d, "Title", "LOWER CROSS DRIVE SUPPORT")
+    AddCriteria(d, "Customer Crossmember Height", GetP(p, "Customer_Crossmember_Height"))
+    Return d
+End Function
+
+
+Function BuildReinforcementPlateSearch(ByVal p As System.Collections.Generic.Dictionary(Of String, String)) As System.Collections.Generic.Dictionary(Of String, String)
+
+    Dim d = NewCriteria()
+
+    AddCriteria(d, "Title", "REINFORCEMENT PLATE")
+
+    'RX2 uses 5.0 in CC
+    AddCriteria(d, "CC", GetSearchCC(p, "REINFORCEMENT PLATE"))
+
+    Return d
+
+End Function
+
+
+'====================================================
+' REQUIRED COMPONENT CHECK
+'====================================================
+Sub CheckRequiredComponentExists( _
+    ByVal componentName As String, _
+    ByVal searchCriteria As System.Collections.Generic.Dictionary(Of String, String), _
+    ByRef missingRequired As String)
+
+    Dim missingParamText As String = GetMissingCriteriaText(searchCriteria)
+
+    If Trim(missingParamText) <> "" Then
+        AddMissingRequiredLine(missingRequired, componentName & " : Missing search value(s): " & missingParamText)
+        Exit Sub
+    End If
+
+    Try
+
+        Dim foundFile As String = GetFileBySearchCriteriaWithWildcards(searchCriteria)
+
+        If Trim(foundFile) = "" Then
+
+            If HasNewPartInput(componentName) Then
+                Exit Sub
+            End If
+
+            AddMissingRequiredLine(missingRequired, componentName & " : No Vault match found and no New PN / Save Location was entered.")
+            Exit Sub
+
+        End If
+
+        StoreFoundVaultFile(componentName, foundFile)
+
+    Catch ex As Exception
+
+        AddMissingRequiredLine(missingRequired, componentName & " : Vault search failed - " & ex.Message)
+
+    End Try
+
+End Sub
+
+
+'====================================================
+' REPLACE OPTIONAL COMPONENT
+'====================================================
+Sub ReplaceOptionalComponent( _
+    ByVal rootAsm As AssemblyDocument, _
+    ByVal targetTitle As String, _
+    ByVal searchParams As System.Collections.Generic.Dictionary(Of String, String), _
+    ByVal fallbackSourceFile As String, _
+    ByRef swapReport As String, _
+    ByRef anySwap As Boolean)
+
+    If rootAsm Is Nothing Then Exit Sub
+
+    If Trim(GetMissingCriteriaText(searchParams)) <> "" Then
+        swapReport &= targetTitle & " : Cannot search - missing " & GetMissingCriteriaText(searchParams) & vbCrLf
+        Exit Sub
+    End If
+
+    ReplaceComponentByCriteria(rootAsm, targetTitle, searchParams, fallbackSourceFile, swapReport, anySwap)
+
+End Sub
+
+
+'====================================================
+' REPLACE STANDARD COMPONENTS
+'====================================================
+Sub ReplaceComponentByCriteria( _
+    ByVal rootAsm As AssemblyDocument, _
+    ByVal targetTitle As String, _
+    ByVal searchParams As System.Collections.Generic.Dictionary(Of String, String), _
+    ByVal fallbackSourceFile As String, _
+    ByRef swapReport As String, _
+    ByRef anySwap As Boolean)
+
+    If rootAsm Is Nothing Then Exit Sub
+
+    Dim newFile As String = FindFileByCriteriaOrCreateNew(rootAsm, targetTitle, searchParams, fallbackSourceFile, swapReport)
+
+    If Trim(newFile) = "" Then Exit Sub
+
+    '====================================================
+    ' GET PART NUMBER
+    '
+    ' If this file was just created, the real iProperty may
+    ' still have the old template PN until properties are
+    ' processed later.
+    '
+    ' Use the stored Configurator PN first.
+    '====================================================
+    Dim newPN As String = GetConfiguredComponentPartNumber(targetTitle)
+
+    If Trim(newPN) = "" Then
+        newPN = GetPartNumber(newFile)
+    End If
+
+    If Trim(newPN) = "" Or UCase(Trim(newPN)) = "UNKNOWN" Then
+        newPN = System.IO.Path.GetFileNameWithoutExtension(newFile)
+    End If
+
+    StoreConfiguratorComponentPartNumber(targetTitle, newPN)
+    StoreConfiguratorComponentFilePath(targetTitle, newFile)
+
+    Dim count As Integer = 0
+    Dim oldParts As New System.Collections.Generic.List(Of String)
+
+    ReplaceAllOccurrences(rootAsm.ComponentDefinition.Occurrences, targetTitle, newFile, count, oldParts)
+
+    If count > 0 Then
+        anySwap = True
+        swapReport &= targetTitle & " : " & BuildUniqueList(oldParts) & " -> " & newPN & " (Qty: " & count & ")" & vbCrLf
+    Else
+        swapReport &= targetTitle & " : File ready, but component not currently placed" & vbCrLf
+    End If
+
+End Sub
+
+'====================================================
+' GET FILE BY CRITERIA OR CREATE NEW
+'====================================================
+Function FindFileByCriteriaOrCreateNew( _
+    ByVal rootAsm As AssemblyDocument, _
+    ByVal targetTitle As String, _
+    ByVal searchParams As System.Collections.Generic.Dictionary(Of String, String), _
+    ByVal fallbackSourceFile As String, _
+    ByRef swapReport As String) As String
+
+    Dim cleanTitle As String = CleanRequiredComponentTitle(targetTitle)
+
+    Dim foundFile As String = GetFileBySearchCriteriaWithWildcards(searchParams)
+
+    If Trim(foundFile) <> "" Then
+        StoreFoundVaultFile(cleanTitle, foundFile)
+        Return foundFile
+    End If
+
+    Dim sourceFile As String = fallbackSourceFile
+
+    If Trim(sourceFile) = "" Then
+        sourceFile = FindFirstOccurrenceFileByTitle(rootAsm.ComponentDefinition.Occurrences, targetTitle)
+    End If
+
+    If Trim(sourceFile) = "" Then
+        swapReport &= targetTitle & " : No Vault match, and no source file found to copy from" & vbCrLf
+        Return ""
+    End If
+
+    If HasNewPartInput(cleanTitle) Then
+
+        Dim inputPN As String = GetNewPartInputPN(cleanTitle)
+        Dim inputPath As String = GetNewPartInputPath(cleanTitle)
+
+        Dim createdFile As String = SaveAsWithProvidedPath(sourceFile, inputPN, inputPath, swapReport, cleanTitle)
+
+        If Trim(createdFile) <> "" Then
+            StoreConfiguratorComponentPartNumber(cleanTitle, inputPN)
+            StoreConfiguratorComponentFilePath(cleanTitle, createdFile)
+            Return createdFile
+        End If
+
+        Return ""
+
+    End If
+
+    If IsRequiredSearchComponent(cleanTitle) Then
+        swapReport &= cleanTitle & " : Required component was not found in Vault and no form New PN / Save Location was provided." & vbCrLf
+        SetStopFlag(cleanTitle & " : Required component was not found in Vault and no form New PN / Save Location was provided.")
+        Return ""
+    End If
+
+    swapReport &= cleanTitle & " : No Vault match found and no form New PN / Save Location was provided. Skipped." & vbCrLf
+    Return ""
+
+End Function
+
+
+
+
+'====================================================
+' SAVE CURRENT TOP ASSEMBLY AS NEW DRIVE ASSY
+'====================================================
+' This version does NOT convert the active/running document.
+'
+' It creates a copy, opens that copy as a new document,
+' then the configurator continues against the opened copy.
+'
+' This avoids the Vault Unknown Status issue caused by
+' running the rule from the same document that was SaveAs'd.
+'====================================================
+Function SaveCurrentAssemblyAsNewDriveAssy( _
+    ByVal sourceAsmDoc As AssemblyDocument, _
+    ByVal newPN As String, _
+    ByRef swapReport As String, _
+    ByRef newDriveAssyFile As String, _
+    ByRef newDriveAssyDoc As AssemblyDocument) As Boolean
+
+    Try
+
+        If sourceAsmDoc Is Nothing Then Return False
+
+        Dim currentFile As String = sourceAsmDoc.FullFileName
+        Dim ext As String = System.IO.Path.GetExtension(currentFile)
+        Dim currentFolder As String = System.IO.Path.GetDirectoryName(currentFile)
+        Dim suggestedFile As String = newPN & ext
+
+        Dim newFile As String = GetNewPartInputPath("DRIVE ASSEMBLY")
+
+        If Trim(newFile) = "" Then
+            newFile = PromptForInventorSavePath("DRIVE ASSEMBLY", currentFolder, suggestedFile, ext)
+        End If
+
+        If Trim(newFile) = "" Then
+            swapReport &= "DRIVE ASSEMBLY : Save As cancelled by user" & vbCrLf & vbCrLf
+            Return False
+        End If
+
+        If LCase(Trim(currentFile)) = LCase(Trim(newFile)) Then
+            MsgBox("The selected file name is the same as the current assembly." & vbCrLf & _
+                   "Choose a different file name.", vbExclamation, "Invalid Save Location")
+            Return False
+        End If
+
+        If System.IO.File.Exists(newFile) Then
+            MsgBox("File already exists:" & vbCrLf & newFile & vbCrLf & vbCrLf & _
+                   "Choose a different file name or location.", vbExclamation, "File Already Exists")
+            Return False
+        End If
+
+        '====================================================
+        ' SAVE COPY AS
+        ' This keeps the original/running document untouched.
+        '====================================================
+        sourceAsmDoc.SaveAs(newFile, True)
+
+        newDriveAssyFile = newFile
+
+        '====================================================
+        ' OPEN THE NEW DRIVE ASSY AS THE WORKING DOCUMENT
+        '====================================================
+        Dim openedDoc As Document = Nothing
+
+        openedDoc = GetOpenDocumentByFullFileName(newFile)
+
+        If openedDoc Is Nothing Then
+            openedDoc = ThisApplication.Documents.Open(newFile, True)
+        End If
+
+        If openedDoc Is Nothing Then
+            Return False
+        End If
+
+		newDriveAssyDoc = CType(openedDoc, AssemblyDocument)
+		
+		Try
+		    newDriveAssyDoc.Activate()
+		Catch
+		End Try
+		
+		'====================================================
+		' STORE NEW DRIVE ASSY PATH FOR RUNS CONFIGURATOR
+		'====================================================
+		Try
+		    SharedVariable("DriveConfig_NewDriveAssyPath") = newDriveAssyDoc.FullFileName
+		Catch
+		End Try
+
+        ApplyPartNumberAndGeneratedDescription(newDriveAssyDoc, "DRIVE ASSEMBLY", newPN)
+
+        Try
+            newDriveAssyDoc.Update2(True)
+        Catch
+            Try
+                newDriveAssyDoc.Update()
+            Catch
+            End Try
+        End Try
+
+        Try
+            newDriveAssyDoc.Save2(True)
+        Catch
+            Try
+                newDriveAssyDoc.Save()
+            Catch
+            End Try
+        End Try
+
+        StoreConfiguratorComponentPartNumber("DRIVE ASSEMBLY", newPN)
+        StoreConfiguratorComponentFilePath("DRIVE ASSEMBLY", newFile)
+
+        swapReport &= "DRIVE ASSEMBLY : Top assembly copied as [" & newPN & "] at [" & newFile & "]" & vbCrLf & vbCrLf
+
+        Return True
+
+    Catch ex As Exception
+
+        MsgBox("Top-level DRIVE ASSEMBLY copy failed for [" & newPN & "]" & vbCrLf & vbCrLf & _
+               ex.Message, vbCritical, "Save Copy As Failed")
+
+        Return False
+
+    End Try
+
+End Function
+
+
+
+'====================================================
+' SAVE AS WITH PROVIDED PATH FROM FORM
+'====================================================
+Function SaveAsWithProvidedPath( _
+    ByVal sourceFile As String, _
+    ByVal newPN As String, _
+    ByVal newFile As String, _
+    ByRef swapReport As String, _
+    ByVal targetLabel As String) As String
+
+    If Trim(sourceFile) = "" Then
+        swapReport &= targetLabel & " : No source file provided for Save As" & vbCrLf
+        Return ""
+    End If
+
+    If Trim(newPN) = "" Then
+        swapReport &= targetLabel & " : New part number was blank" & vbCrLf
+        Return ""
+    End If
+
+    If Trim(newFile) = "" Then
+        swapReport &= targetLabel & " : Save location was blank" & vbCrLf
+        Return ""
+    End If
+
+    Return SaveAsCore(sourceFile, newPN, newFile, swapReport, targetLabel)
+
+End Function
+
+
+'====================================================
+' SAVE AS CORE
+'====================================================
+' Copies the source file to a new file path.
+'
+' IMPORTANT:
+'   This version does NOT open the newly created file.
+'
+' Workflow:
+'   1. Open source/template file invisibly
+'   2. Save Copy As new file
+'   3. Close source/template file
+'   4. Store pending Part Number / Description task
+'   5. Store drawing task
+'   6. Store created child file path
+'   7. Return new file path for occurrence replacement
+'
+' Later:
+'   ProcessCreatedPropertyTasks() opens the created files,
+'   writes Part Number and Description, saves them, and
+'   leaves them open.
+'
+' Existing Vault files are never modified.
+'====================================================
+Function SaveAsCore( _
+    ByVal sourceFile As String, _
+    ByVal newPN As String, _
+    ByVal newFile As String, _
+    ByRef swapReport As String, _
+    ByVal targetLabel As String) As String
+
+    Dim sourceDoc As Document = Nothing
+
+    Try
+
+        '====================================================
+        ' VALIDATION
+        '====================================================
+        If Trim(sourceFile) = "" Then
+            swapReport &= targetLabel & " : Source file was blank" & vbCrLf
+            Return ""
+        End If
+
+        If Not System.IO.File.Exists(sourceFile) Then
+            swapReport &= targetLabel & " : Source file not found [" & sourceFile & "]" & vbCrLf
+            Return ""
+        End If
+
+        If Trim(newPN) = "" Then
+            swapReport &= targetLabel & " : New part number was blank" & vbCrLf
+            Return ""
+        End If
+
+        If Trim(newFile) = "" Then
+            swapReport &= targetLabel & " : Save location was blank" & vbCrLf
+            Return ""
+        End If
+
+        If LCase(Trim(sourceFile)) = LCase(Trim(newFile)) Then
+            swapReport &= targetLabel & " : Save location matches source file. Skipped." & vbCrLf
+            Return ""
+        End If
+
+        If System.IO.File.Exists(newFile) Then
+            swapReport &= targetLabel & " : File already exists [" & newFile & "]" & vbCrLf
+            Return ""
+        End If
+
+        '====================================================
+        ' CREATE COPY ONLY
+        '
+        ' This creates the new file but does not open it.
+        '====================================================
+        sourceDoc = ThisApplication.Documents.Open(sourceFile, False)
+
+        sourceDoc.SaveAs(newFile, True)
+
+        Try
+            sourceDoc.Close(False)
+        Catch
+        End Try
+
+        sourceDoc = Nothing
+
+        If Not System.IO.File.Exists(newFile) Then
+            swapReport &= targetLabel & " : Save Copy As did not create file [" & newFile & "]" & vbCrLf
+            Return ""
+        End If
+
+        '====================================================
+        ' STORE PENDING PROPERTY WRITE
+        '
+        ' PN and Description are written after replacements.
+        '====================================================
+        StoreCreatedPropertyTask(targetLabel, newFile, newPN)
+
+        '====================================================
+        ' STORE DRAWING TASK FOR LATER
+        '
+        ' Drawings should be created after replacement and
+        ' after properties have been written.
+        '====================================================
+        StoreCreatedDrawingTask(targetLabel, newFile, sourceFile)
+
+        '====================================================
+        ' TRACK CREATED FILE
+        '====================================================
+        StoreCreatedChildFile(newFile)
+
+        swapReport &= _
+            targetLabel & _
+            " : No Vault match, created new file [" & _
+            newPN & _
+            "] at [" & _
+            newFile & _
+            "]" & _
+            vbCrLf
+
+        Return newFile
+
+    Catch ex As Exception
+
+        MsgBox( _
+            "Save As failed for [" & targetLabel & "]" & vbCrLf & vbCrLf & _
+            "Part Number: " & newPN & vbCrLf & _
+            "Path: " & newFile & vbCrLf & vbCrLf & _
+            ex.Message, _
+            vbCritical, _
+            "Save As Failed")
+
+        Return ""
+
+    Finally
+
+        Try
+            If Not sourceDoc Is Nothing Then
+                sourceDoc.Close(False)
+            End If
+        Catch
+        End Try
+
+    End Try
+
+End Function
+
+'====================================================
+' APPLY PART NUMBER AND GENERATED DESCRIPTION
+'====================================================
+' Only used on NEW files.
+' Existing Vault files are never modified.
+'====================================================
+Sub ApplyPartNumberAndGeneratedDescription( _
+    ByVal oDoc As Document, _
+    ByVal componentName As String, _
+    ByVal newPN As String)
+
+    If oDoc Is Nothing Then Exit Sub
+
+    Try
+
+        oDoc.PropertySets.Item( _
+            "Design Tracking Properties") _
+            .Item("Part Number").Value = _
+            Trim(newPN)
+
+    Catch
+    End Try
+
+    Dim generatedDesc As String = _
+        GetGeneratedDescriptionFromSharedVariable( _
+            componentName)
+
+    If Trim(generatedDesc) <> "" Then
+
+        Try
+
+            oDoc.PropertySets.Item( _
+                "Design Tracking Properties") _
+                .Item("Description").Value = _
+                generatedDesc
+
+        Catch
+        End Try
+
+    End If
+
+    'Do not save here.
+    'The caller updates and saves the document.
+
+End Sub
+
+
+'====================================================
+' GENERATED DESCRIPTION FROM SHARED VARIABLE
+'====================================================
+Function GetGeneratedDescriptionFromSharedVariable(ByVal componentName As String) As String
+
+    Try
+        Dim key As String = GetConfiguratorComponentKey(componentName)
+
+        If SharedVariable.Exists("DriveConfig_DESC_" & key) Then
+            Return Trim(CStr(SharedVariable("DriveConfig_DESC_" & key)))
+        End If
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+'====================================================
+' VAULT SEARCH WITH WILDCARDS
+'
+' TITLE and CATEGORY NAME use exact matching.
+'
+' All other properties use wildcard matching so Vault
+' can match formatted parameter/property values.
+'
+' Because NewCriteria() always includes:
+'     Category Name = MOBILE
+'
+' every Vault search in this rule is restricted to the
+' MOBILE category.
+'====================================================
+Function GetFileBySearchCriteriaWithWildcards( _
+    ByVal searchCriteria As System.Collections.Generic.Dictionary(Of String, String)) As String
+
+    Try
+
+        If searchCriteria Is Nothing Then Return ""
+
+        Dim searchToUse As New System.Collections.Generic.Dictionary(Of String, String)
+
+        For Each kvp As System.Collections.Generic.KeyValuePair(Of String, String) In searchCriteria
+
+            Dim keyText As String = Trim(kvp.Key)
+            Dim valueText As String = Trim(kvp.Value)
+            Dim upperKey As String = UCase(keyText)
+
+            '====================================================
+            ' EXACT MATCH PROPERTIES
+            '====================================================
+            If upperKey = "TITLE" OrElse _
+               upperKey = "CATEGORY NAME" Then
+
+                searchToUse.Add(keyText, valueText)
+
+            '====================================================
+            ' BLANK VALUES
+            '====================================================
+            ElseIf valueText = "" Then
+
+                searchToUse.Add(keyText, valueText)
+
+            '====================================================
+            ' VALUE ALREADY HAS WILDCARDS
+            '====================================================
+            ElseIf Left(valueText, 1) = "*" AndAlso _
+                   Right(valueText, 1) = "*" Then
+
+                searchToUse.Add(keyText, valueText)
+
+            '====================================================
+            ' STANDARD WILDCARD SEARCH
+            '====================================================
+            Else
+
+                searchToUse.Add(keyText, "*" & valueText & "*")
+
+            End If
+
+        Next
+
+        Dim foundFile As String = _
+            iLogicVault.GetFileBySearchCriteria( _
+                searchToUse, _
+                True, _
+                False)
+
+        If Trim(foundFile) = "" Then Return ""
+
+        Dim ext As String = _
+            LCase(System.IO.Path.GetExtension(foundFile))
+
+        Select Case ext
+
+            Case ".ipt", ".iam"
+                Return foundFile
+
+			Case ".idw", ".dwg", ".ipn"
+			
+			    Dim baseName As String = _
+			        System.IO.Path.GetFileNameWithoutExtension( _
+			            foundFile)
+			
+			    Dim folder As String = _
+			        System.IO.Path.GetDirectoryName( _
+			            foundFile)
+			
+			    Dim iptFile As String = _
+			        System.IO.Path.Combine(folder, baseName & ".ipt")
+			
+			    Dim iamFile As String = _
+			        System.IO.Path.Combine(folder, baseName & ".iam")
+			
+			    If System.IO.File.Exists(iptFile) Then
+			        Return iptFile
+			    End If
+			
+			    If System.IO.File.Exists(iamFile) Then
+			        Return iamFile
+			    End If
+			
+			    Return ""
+
+
+            Case Else
+
+                MsgBox( _
+                    "Vault returned an unsupported file type:" & _
+                    vbCrLf & vbCrLf & _
+                    foundFile, _
+                    vbExclamation, _
+                    "Vault Search Result")
+
+                Return ""
+
+        End Select
+
+    Catch
+
+        Return ""
+
+    End Try
+
+End Function
+
+
+'====================================================
+' INVENTOR SAVE DIALOG
+'====================================================
+Function PromptForInventorSavePath( _
+    ByVal targetLabel As String, _
+    ByVal initialFolder As String, _
+    ByVal suggestedFileName As String, _
+    ByVal ext As String) As String
+
+    Dim dlg As Inventor.FileDialog = Nothing
+
+    Try
+
+        ThisApplication.CreateFileDialog(dlg)
+
+        dlg.DialogTitle = "Save New File For " & targetLabel
+        dlg.InitialDirectory = initialFolder
+        dlg.FileName = suggestedFileName
+        dlg.CancelError = True
+
+        If LCase(ext) = ".ipt" Then
+            dlg.Filter = "Inventor Part Files (*.ipt)|*.ipt"
+        ElseIf LCase(ext) = ".iam" Then
+            dlg.Filter = "Inventor Assembly Files (*.iam)|*.iam"
+        Else
+            dlg.Filter = "Matching Files (*" & ext & ")|*" & ext
+        End If
+
+        Try
+            dlg.ShowSave()
+            Return dlg.FileName
+        Catch
+            Return ""
+        End Try
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' CREATE DRIVE GENERATOR DRAWING
+'====================================================
+Sub CreateDriveGeneratorDrawing( _
+    ByVal oModelDoc As Document, _
+    ByVal targetLabel As String, _
+    ByRef swapReport As String, _
+    Optional ByVal templateSourceFile As String = "")
+
+    If oModelDoc Is Nothing Then Exit Sub
+
+    If oModelDoc.DocumentType <> DocumentTypeEnum.kPartDocumentObject And _
+       oModelDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+        Exit Sub
+    End If
+
+    Dim modelFile As String = ""
+
+    Try
+        modelFile = oModelDoc.FullFileName
+    Catch
+        Exit Sub
+    End Try
+
+    If Trim(modelFile) = "" Then Exit Sub
+    If Not System.IO.File.Exists(modelFile) Then Exit Sub
+
+    Dim modelPN As String = GetDocumentPartNumber(oModelDoc)
+
+    If Trim(modelPN) = "" Then
+        modelPN = System.IO.Path.GetFileNameWithoutExtension(modelFile)
+    End If
+
+	Dim templatePath As String = ""
+	
+	If Trim(templateSourceFile) <> "" Then
+	    templatePath = System.IO.Path.ChangeExtension(templateSourceFile, ".idw")
+	End If
+	
+	If Trim(templatePath) = "" Then
+	    templatePath = GetDrawingTemplatePath(targetLabel)
+	End If
+
+	If Trim(templatePath) = "" Then
+	    swapReport &= "DRAWING : No template path found for [" & targetLabel & "]" & vbCrLf
+	    Exit Sub
+	End If
+
+    If Not System.IO.File.Exists(templatePath) Then
+        swapReport &= "DRAWING : Template not found for [" & targetLabel & "] - [" & templatePath & "]" & vbCrLf
+        Exit Sub
+    End If
+
+    Dim drawingFile As String = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(modelFile), modelPN & ".idw")
+
+    If System.IO.File.Exists(drawingFile) Then
+        swapReport &= "DRAWING : Already exists [" & modelPN & ".idw]" & vbCrLf
+        Exit Sub
+    End If
+
+    Dim oDraw As DrawingDocument = Nothing
+
+    Try
+
+        oDraw = CType(ThisApplication.Documents.Open(templatePath, False), DrawingDocument)
+        oDraw.SaveAs(drawingFile, False)
+
+        Dim replaced As Integer = 0
+
+        For Each fd As FileDescriptor In oDraw.File.ReferencedFileDescriptors
+            Try
+                Dim refFile As String = fd.FullFileName
+                Dim refExt As String = LCase(System.IO.Path.GetExtension(refFile))
+
+                If refExt = ".ipt" Or refExt = ".iam" Then
+                    fd.ReplaceReference(modelFile)
+                    replaced += 1
+                End If
+            Catch
+            End Try
+        Next
+
+        Try
+            oDraw.Update()
+        Catch
+        End Try
+
+        Try
+            oDraw.Save2(True)
+        Catch
+            oDraw.Save()
+        End Try
+
+        If replaced = 0 Then
+            swapReport &= "DRAWING : Created [" & modelPN & ".idw], but no model reference was replaced" & vbCrLf
+        Else
+            swapReport &= "DRAWING : Created [" & modelPN & ".idw] from template [" & System.IO.Path.GetFileName(templatePath) & "]" & vbCrLf
+        End If
+
+    Catch ex As Exception
+
+        swapReport &= "DRAWING : Failed [" & modelPN & "] - " & ex.Message & vbCrLf
+
+    Finally
+
+        Try
+            If Not oDraw Is Nothing Then oDraw.Close(True)
+        Catch
+        End Try
+
+    End Try
+
+End Sub
+
+
+
+'====================================================
+' DRAWING TEMPLATE PATH
+'
+' Uses the source file currently in the assembly.
+'====================================================
+Function GetDrawingTemplatePath(ByVal targetLabel As String) As String
+
+    Dim sourceFile As String = ""
+
+    Select Case UCase(Trim(targetLabel))
+
+        Case "DRIVE ASSEMBLY"
+            sourceFile = GetBestInitialSourceFile("DRIVE ASSEMBLY", "", True)
+
+        Case "DRIVE FRAME"
+            sourceFile = GetBestInitialSourceFile("DRIVE FRAME", "", False)
+
+        Case "CYLINDER MOUNT"
+            sourceFile = GetBestInitialSourceFile("CYLINDER MOUNT", "", False)
+
+        Case "CYLINDER MOUNT ASSEMBLY"
+            sourceFile = GetBestInitialSourceFile("CYLINDER MOUNT ASSEMBLY", "", False)
+
+        Case "STIFFENER"
+            sourceFile = GetBestInitialSourceFile("STIFFENER", "", False)
+
+        Case "CROSSMEMBER"
+            sourceFile = GetBestInitialSourceFile("CROSSMEMBER", "", False)
+
+        Case Else
+            Return ""
+
+    End Select
+
+    If Trim(sourceFile) = "" Then Return ""
+
+    Return System.IO.Path.ChangeExtension(sourceFile, ".idw")
+
+End Function
+
+'====================================================
+' REPLACE ALL OCCURRENCES BY TITLE
+'
+' Safer version:
+'   1. Collects matching occurrences first.
+'   2. Replaces after collection is complete.
+'
+' Do not update/save subassemblies inside recursion.
+'====================================================
+Sub ReplaceAllOccurrences( _
+    ByVal occs As ComponentOccurrences, _
+    ByVal targetTitle As String, _
+    ByVal newFile As String, _
+    ByRef count As Integer, _
+    ByRef oldParts As System.Collections.Generic.List(Of String))
+
+    If occs Is Nothing Then Exit Sub
+    If Trim(targetTitle) = "" Then Exit Sub
+    If Trim(newFile) = "" Then Exit Sub
+
+    Dim matches As New System.Collections.Generic.List(Of ComponentOccurrence)
+    Dim visitedDocs As New System.Collections.Generic.Dictionary(Of String, Boolean)
+
+    CollectOccurrencesByTitle( _
+        occs, _
+        targetTitle, _
+        matches, _
+        visitedDocs)
+
+    For Each occ As ComponentOccurrence In matches
+
+        Try
+
+            oldParts.Add(GetOccurrencePartNumber(occ))
+
+			'Use False here because this rule already collected every matching occurrence.
+			'This still replaces all matches through the loop, but avoids Inventor's internal
+			'replace-all behavior fighting the manual recursive loop.
+			occ.Replace(newFile, False)
+
+            count += 1
+
+        Catch ex As Exception
+
+            MsgBox( _
+                "Replace failed" & vbCrLf & vbCrLf & _
+                "Target Title: " & targetTitle & vbCrLf & _
+                "Occurrence Title: " & GetOccurrenceTitle(occ) & vbCrLf & _
+                "Current File: " & GetOccurrenceFilePath(occ) & vbCrLf & _
+                "New File: " & newFile & vbCrLf & vbCrLf & _
+                ex.Message, _
+                vbCritical, _
+                "Replace Error")
+
+        End Try
+
+    Next
+
+End Sub
+
+
+
+'====================================================
+' COLLECT OCCURRENCES BY TITLE
+'
+' Recursively searches real subassembly documents.
+' Does not replace, update, or save anything.
+'====================================================
+Sub CollectOccurrencesByTitle( _
+    ByVal occs As ComponentOccurrences, _
+    ByVal targetTitle As String, _
+    ByVal matches As System.Collections.Generic.List(Of ComponentOccurrence), _
+    ByVal visitedDocs As System.Collections.Generic.Dictionary(Of String, Boolean))
+
+    If occs Is Nothing Then Exit Sub
+
+    For Each occ As ComponentOccurrence In occs
+
+        Try
+
+            If StringsEqual(GetOccurrenceTitle(occ), targetTitle) Then
+                matches.Add(occ)
+            End If
+
+            If TypeOf occ.Definition.Document Is AssemblyDocument Then
+
+                Dim subAsm As AssemblyDocument = _
+                    CType(occ.Definition.Document, AssemblyDocument)
+
+                Dim docKey As String = GetDocumentUniqueKey(subAsm)
+
+                If Trim(docKey) <> "" Then
+
+                    If Not visitedDocs.ContainsKey(docKey) Then
+
+                        visitedDocs.Add(docKey, True)
+
+                        CollectOccurrencesByTitle( _
+                            subAsm.ComponentDefinition.Occurrences, _
+                            targetTitle, _
+                            matches, _
+                            visitedDocs)
+
+                    End If
+
+                End If
+
+            End If
+
+        Catch
+        End Try
+
+    Next
+
+End Sub
+
+
+'====================================================
+' DOCUMENT UNIQUE KEY
+'
+' Prevents recursive loops and repeated traversal.
+'====================================================
+Function GetDocumentUniqueKey(ByVal doc As Document) As String
+
+    If doc Is Nothing Then Return ""
+
+    Try
+        If Trim(doc.FullFileName) <> "" Then
+            Return UCase(Trim(doc.FullFileName))
+        End If
+    Catch
+    End Try
+
+    Try
+        Return UCase(Trim(doc.DisplayName))
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+
+'====================================================
+' FIND FIRST OCCURRENCE FILE BY TITLE
+'
+' Safe recursive version with visited document tracking.
+'====================================================
+Function FindFirstOccurrenceFileByTitle( _
+    ByVal occs As ComponentOccurrences, _
+    ByVal targetTitle As String) As String
+
+    Dim visitedDocs As New System.Collections.Generic.Dictionary(Of String, Boolean)
+
+    Return FindFirstOccurrenceFileByTitleCore( _
+        occs, _
+        targetTitle, _
+        visitedDocs)
+
+End Function
+
+
+Function FindFirstOccurrenceFileByTitleCore( _
+    ByVal occs As ComponentOccurrences, _
+    ByVal targetTitle As String, _
+    ByVal visitedDocs As System.Collections.Generic.Dictionary(Of String, Boolean)) As String
+
+    If occs Is Nothing Then Return ""
+
+    For Each occ As ComponentOccurrence In occs
+
+        Try
+
+            If StringsEqual(GetOccurrenceTitle(occ), targetTitle) Then
+                Return GetOccurrenceFilePath(occ)
+            End If
+
+            If TypeOf occ.Definition.Document Is AssemblyDocument Then
+
+                Dim subAsm As AssemblyDocument = _
+                    CType(occ.Definition.Document, AssemblyDocument)
+
+                Dim docKey As String = GetDocumentUniqueKey(subAsm)
+
+                If Trim(docKey) <> "" Then
+
+                    If Not visitedDocs.ContainsKey(docKey) Then
+
+                        visitedDocs.Add(docKey, True)
+
+                        Dim nestedFile As String = _
+                            FindFirstOccurrenceFileByTitleCore( _
+                                subAsm.ComponentDefinition.Occurrences, _
+                                targetTitle, _
+                                visitedDocs)
+
+                        If Trim(nestedFile) <> "" Then Return nestedFile
+
+                    End If
+
+                End If
+
+            End If
+
+        Catch
+        End Try
+
+    Next
+
+    Return ""
+
+End Function
+
+
+'====================================================
+' FIND FIRST CHILD FILE INSIDE PARENT BY TITLE
+'
+' Safe recursive version with visited document tracking.
+'====================================================
+Function FindFirstChildOccurrenceFileInsideParent( _
+    ByVal occs As ComponentOccurrences, _
+    ByVal parentTitle As String, _
+    ByVal childTitle As String) As String
+
+    Dim visitedDocs As New System.Collections.Generic.Dictionary(Of String, Boolean)
+
+    Return FindFirstChildOccurrenceFileInsideParentCore( _
+        occs, _
+        parentTitle, _
+        childTitle, _
+        visitedDocs)
+
+End Function
+
+
+Function FindFirstChildOccurrenceFileInsideParentCore( _
+    ByVal occs As ComponentOccurrences, _
+    ByVal parentTitle As String, _
+    ByVal childTitle As String, _
+    ByVal visitedDocs As System.Collections.Generic.Dictionary(Of String, Boolean)) As String
+
+    If occs Is Nothing Then Return ""
+
+    For Each occ As ComponentOccurrence In occs
+
+        Try
+
+            If StringsEqual(GetOccurrenceTitle(occ), parentTitle) Then
+
+                If TypeOf occ.Definition.Document Is AssemblyDocument Then
+
+                    Dim parentAsm As AssemblyDocument = _
+                        CType(occ.Definition.Document, AssemblyDocument)
+
+                    Dim childFile As String = _
+                        FindFirstOccurrenceFileByTitle( _
+                            parentAsm.ComponentDefinition.Occurrences, _
+                            childTitle)
+
+                    If Trim(childFile) <> "" Then Return childFile
+
+                End If
+
+            End If
+
+            If TypeOf occ.Definition.Document Is AssemblyDocument Then
+
+                Dim subAsm As AssemblyDocument = _
+                    CType(occ.Definition.Document, AssemblyDocument)
+
+                Dim docKey As String = GetDocumentUniqueKey(subAsm)
+
+                If Trim(docKey) <> "" Then
+
+                    If Not visitedDocs.ContainsKey(docKey) Then
+
+                        visitedDocs.Add(docKey, True)
+
+                        Dim nestedFile As String = _
+                            FindFirstChildOccurrenceFileInsideParentCore( _
+                                subAsm.ComponentDefinition.Occurrences, _
+                                parentTitle, _
+                                childTitle, _
+                                visitedDocs)
+
+                        If Trim(nestedFile) <> "" Then Return nestedFile
+
+                    End If
+
+                End If
+
+            End If
+
+        Catch
+        End Try
+
+    Next
+
+    Return ""
+
+End Function
+
+
+'====================================================
+' SHARED VARIABLE STORAGE
+'====================================================
+Sub ResetSearchResultSharedVariables()
+
+    Try
+
+			SharedVariable("DriveConfig_StopAfterSearch") = False
+			SharedVariable("DriveConfig_StopReason") = ""
+			SharedVariable("DriveConfig_NewDriveAssyPath") = ""
+			SharedVariable("DriveConfig_CreatedChildFiles") = ""
+			SharedVariable("DriveConfig_CreatedDrawingTasks") = ""
+			SharedVariable("DriveConfig_CreatedPropertyTasks") = ""
+
+        Dim keys() As String = New String() { _
+            "DRIVE_ASSEMBLY", _
+            "CROSSMEMBER", _
+            "DRIVE_CORE", _
+            "CROSS_DRIVE_SET", _
+            "UPPER_CROSS_DRIVE_SUPPORT", _
+            "SERIAL_PLATE", _
+            "CYLINDER_MOUNT", _
+            "STIFFENER", _
+            "DRIVE_FRAME", _
+            "CYLINDER_MOUNT_ASSEMBLY" _
+        }
+
+        For Each key As String In keys
+
+            SharedVariable("DriveConfig_PN_" & key) = ""
+            SharedVariable("DriveConfig_FILE_" & key) = ""
+
+            'Do NOT clear DriveConfig_DESC_* here.
+            'The Generate Description rule owns descriptions.
+
+        Next
+
+    Catch
+    End Try
+
+End Sub
+
+
+Sub StoreFoundVaultFile( _
+    ByVal componentName As String, _
+    ByVal filePath As String)
+
+    StoreConfiguratorComponentPartNumber(componentName, GetPartNumber(filePath))
+    StoreConfiguratorComponentFilePath(componentName, filePath)
+
+End Sub
+
+
+Sub StoreConfiguratorComponentPartNumber( _
+    ByVal componentName As String, _
+    ByVal partNumber As String)
+
+    Try
+        Dim key As String = GetConfiguratorComponentKey(componentName)
+        SharedVariable("DriveConfig_PN_" & key) = Trim(partNumber)
+    Catch
+    End Try
+
+End Sub
+
+
+Sub StoreConfiguratorComponentFilePath( _
+    ByVal componentName As String, _
+    ByVal filePath As String)
+
+    Try
+        Dim key As String = GetConfiguratorComponentKey(componentName)
+        SharedVariable("DriveConfig_FILE_" & key) = Trim(filePath)
+    Catch
+    End Try
+
+End Sub
+
+
+Function GetNewPartInputPN(ByVal componentName As String) As String
+
+    Try
+        Dim key As String = GetConfiguratorComponentKey(componentName)
+
+        If SharedVariable.Exists("DriveConfig_InputPN_" & key) Then
+            Return CStr(SharedVariable("DriveConfig_InputPN_" & key))
+        End If
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+Function GetNewPartInputPath(ByVal componentName As String) As String
+
+    Try
+        Dim key As String = GetConfiguratorComponentKey(componentName)
+
+        If SharedVariable.Exists("DriveConfig_InputPath_" & key) Then
+            Return CStr(SharedVariable("DriveConfig_InputPath_" & key))
+        End If
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+Function HasNewPartInput(ByVal componentName As String) As Boolean
+
+    Return Trim(GetNewPartInputPN(componentName)) <> "" And _
+           Trim(GetNewPartInputPath(componentName)) <> ""
+
+End Function
+
+
+'====================================================
+' COMPONENT KEY
+'====================================================
+Function GetConfiguratorComponentKey(ByVal componentName As String) As String
+
+    Dim key As String = UCase(Trim(componentName))
+
+    If InStr(key, "DRIVE ASSEMBLY") > 0 Then Return "DRIVE_ASSEMBLY"
+    If InStr(key, "DRIVE CORE") > 0 Then Return "DRIVE_CORE"
+    If InStr(key, "UPPER CROSS DRIVE SUPPORT") > 0 Then Return "UPPER_CROSS_DRIVE_SUPPORT"
+    If InStr(key, "CROSS DRIVE SET") > 0 Then Return "CROSS_DRIVE_SET"
+    If InStr(key, "SERIAL PLATE") > 0 Then Return "SERIAL_PLATE"
+    If InStr(key, "CYLINDER MOUNT ASSEMBLY") > 0 Then Return "CYLINDER_MOUNT_ASSEMBLY"
+    If InStr(key, "CYLINDER MOUNT") > 0 Then Return "CYLINDER_MOUNT"
+    If InStr(key, "DRIVE FRAME") > 0 Then Return "DRIVE_FRAME"
+    If InStr(key, "STIFFENER") > 0 Then Return "STIFFENER"
+    If InStr(key, "CROSSMEMBER") > 0 Then Return "CROSSMEMBER"
+
+    Return Replace(key, " ", "_")
+
+End Function
+
+
+'====================================================
+' GENERAL HELPERS
+'====================================================
+Function GetP( _
+    ByVal p As System.Collections.Generic.Dictionary(Of String, String), _
+    ByVal key As String) As String
+
+    Try
+        If p.ContainsKey(key) Then Return Trim(p.Item(key))
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+'====================================================
+' SAFE iPROPERTY / PARAMETER READ
+'====================================================
+' Used by the Vault search builders.
+'
+' For TEXT / BOOLEAN parameters:
+'   Uses the parameter value.
+'
+' For numeric / unit parameters:
+'   Uses the exported Custom iProperty first.
+'
+' This is important because:
+'
+'   Parameter Expression may be:
+'       60 in
+'       40 in
+'
+'   Exported Custom iProperty may be:
+'       60.0 in
+'       40.0 in
+'
+' Vault is matching the exported Custom iProperty value.
+'====================================================
+
+Function SafeiProp(ByVal propName As String) As String
+
+    Try
+
+        Dim rawDoc As Document = ThisDoc.Document
+
+        If rawDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            Dim asmDoc As AssemblyDocument = CType(rawDoc, AssemblyDocument)
+            Dim userParams As UserParameters = asmDoc.ComponentDefinition.Parameters.UserParameters
+
+            Dim oParam As UserParameter = Nothing
+
+            Try
+                oParam = userParams.Item(propName)
+            Catch
+                oParam = Nothing
+            End Try
+
+            If Not oParam Is Nothing Then
+
+                Dim unitText As String = ""
+
+                Try
+                    unitText = UCase(Trim(CStr(oParam.Units)))
+                Catch
+                    unitText = ""
+                End Try
+
+                '====================================================
+                ' TEXT / BOOLEAN PARAMETERS
+                '====================================================
+
+                If unitText = "TEXT" Or _
+                   unitText = "BOOLEAN" Or _
+                   unitText = "TRUE/FALSE" Then
+
+                    Try
+                        Return Trim(CStr(oParam.Value))
+                    Catch
+                        Return ""
+                    End Try
+
+                End If
+
+                '====================================================
+                ' NUMERIC / UNIT PARAMETERS
+                '====================================================
+                ' Read the exported Custom iProperty first.
+                ' This is the formatted value Vault should match.
+                '====================================================
+
+                Try
+
+                    Dim propSet As PropertySet = _
+                        rawDoc.PropertySets.Item("Inventor User Defined Properties")
+
+                    Dim propValue As String = _
+                        Trim(CStr(propSet.Item(propName).Value))
+
+                    If propValue <> "" Then
+                        Return propValue
+                    End If
+
+                Catch
+                End Try
+
+                '====================================================
+                ' FALLBACK TO PARAMETER EXPRESSION
+                '====================================================
+
+                Try
+                    Return Trim(CStr(oParam.Expression))
+                Catch
+                    Return ""
+                End Try
+
+            End If
+
+        End If
+
+    Catch
+    End Try
+
+    '====================================================
+    ' FINAL FALLBACK
+    '====================================================
+    ' Try reading the custom property directly.
+    '====================================================
+
+    Try
+
+        Dim rawDoc As Document = ThisDoc.Document
+
+        Dim propSet As PropertySet = _
+            rawDoc.PropertySets.Item("Inventor User Defined Properties")
+
+        Return Trim(CStr(propSet.Item(propName).Value))
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function GetMissingCriteriaText( _
+    ByVal searchCriteria As System.Collections.Generic.Dictionary(Of String, String)) As String
+
+    Dim result As String = ""
+
+    If searchCriteria Is Nothing Then Return "[NO CRITERIA]"
+
+    For Each kvp As System.Collections.Generic.KeyValuePair(Of String, String) In searchCriteria
+
+        If Trim(kvp.Value) = "" Then
+
+            If result <> "" Then result &= ", "
+            result &= "[" & kvp.Key & "]"
+
+        End If
+
+    Next
+
+    Return result
+
+End Function
+
+
+Sub AddMissingRequiredLine( _
+    ByRef missingRequired As String, _
+    ByVal lineText As String)
+
+    If Trim(missingRequired) <> "" Then missingRequired &= vbCrLf
+    missingRequired &= lineText
+
+End Sub
+
+
+Sub SetStopFlag(ByVal reason As String)
+
+    Try
+        SharedVariable("DriveConfig_StopAfterSearch") = True
+        SharedVariable("DriveConfig_StopReason") = reason
+    Catch
+    End Try
+
+End Sub
+
+
+Function IsRequiredSearchComponent(ByVal targetTitle As String) As Boolean
+
+    Dim key As String = UCase(Trim(targetTitle))
+
+    If key = "PHANTOM CONTROLS ASSEMBLY" Then Return True
+    If key = "CROSS DRIVE SET" Then Return True
+    If key = "DRIVE CORE" Then Return True
+    If key = "SERIAL PLATE" Then Return True
+    If key = "UPPER CROSS DRIVE SUPPORT" Then Return True
+    If key = "PHANTOM VALVE MOUNTS" Then Return True
+    If key = "PHANTOM TIE TUBES" Then Return True
+
+    Return False
+
+End Function
+
+
+Function CleanRequiredComponentTitle(ByVal targetLabel As String) As String
+
+    Dim key As String = UCase(Trim(targetLabel))
+
+    If InStr(key, "CROSS DRIVE SET") > 0 Then Return "CROSS DRIVE SET"
+    If InStr(key, "DRIVE CORE") > 0 Then Return "DRIVE CORE"
+    If InStr(key, "UPPER CROSS DRIVE SUPPORT") > 0 Then Return "UPPER CROSS DRIVE SUPPORT"
+    If InStr(key, "PHANTOM VALVE MOUNTS") > 0 Then Return "PHANTOM VALVE MOUNTS"
+    If InStr(key, "PHANTOM TIE TUBES") > 0 Then Return "PHANTOM TIE TUBES"
+    If InStr(key, "SERIAL PLATE") > 0 Then Return "SERIAL PLATE"
+    If InStr(key, "PHANTOM CONTROLS ASSEMBLY") > 0 Then Return "PHANTOM CONTROLS ASSEMBLY"
+
+    Return Trim(targetLabel)
+
+End Function
+
+
+
+
+'Function BuildCriteriaText( _
+'    ByVal searchParams As System.Collections.Generic.Dictionary(Of String, String)) As String
+
+'    If searchParams Is Nothing Then Return "NO SEARCH CRITERIA PASSED"
+
+'    Dim result As String = ""
+
+'    For Each kvp As System.Collections.Generic.KeyValuePair(Of String, String) In searchParams
+'        If result <> "" Then result &= vbCrLf
+'        result &= kvp.Key & " = " & kvp.Value
+'    Next
+
+'    Return result
+
+'End Function
+
+
+Function StringsEqual(ByVal a As String, ByVal b As String) As Boolean
+    Return UCase(Trim(a)) = UCase(Trim(b))
+End Function
+
+
+Function GetOccurrenceTitle(ByVal occ As ComponentOccurrence) As String
+    Try
+        Return CStr(occ.Definition.Document.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+End Function
+
+
+Function GetDocumentTitle(ByVal doc As Document) As String
+    Try
+        Return CStr(doc.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+End Function
+
+
+Function GetOccurrencePartNumber(ByVal occ As ComponentOccurrence) As String
+    Try
+        Return CStr(occ.Definition.Document.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value)
+    Catch
+        Return "UNKNOWN"
+    End Try
+End Function
+
+
+Function GetOccurrenceFilePath(ByVal occ As ComponentOccurrence) As String
+    Try
+        Return occ.Definition.Document.FullFileName
+    Catch
+        Return ""
+    End Try
+End Function
+
+
+Function GetOpenDocumentByFullFileName(ByVal filePath As String) As Document
+
+    Try
+
+        Dim cleanPath As String = LCase(Trim(filePath))
+
+        For Each d As Document In ThisApplication.Documents
+
+            Try
+                If LCase(Trim(d.FullFileName)) = cleanPath Then
+                    Return d
+                End If
+            Catch
+            End Try
+
+        Next
+
+    Catch
+    End Try
+
+    Return Nothing
+
+End Function
+
+
+Function GetPartNumber(ByVal filePath As String) As String
+
+    Dim doc As Document = Nothing
+    Dim openedHere As Boolean = False
+
+    Try
+
+        If Trim(filePath) = "" Then Return "UNKNOWN"
+        If Not System.IO.File.Exists(filePath) Then Return "UNKNOWN"
+
+        doc = GetOpenDocumentByFullFileName(filePath)
+
+        If doc Is Nothing Then
+            doc = ThisApplication.Documents.Open(filePath, False)
+            openedHere = True
+        End If
+
+        Return GetDocumentPartNumber(doc)
+
+    Catch
+
+        Return "UNKNOWN"
+
+    Finally
+
+        Try
+            If openedHere And Not doc Is Nothing Then
+                doc.Close(False)
+            End If
+        Catch
+        End Try
+
+    End Try
+
+End Function
+
+
+Function GetDocumentPartNumber(ByVal doc As Document) As String
+
+    Try
+        Return Trim(CStr(doc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value))
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+Function BuildUniqueList(ByVal lst As System.Collections.Generic.List(Of String)) As String
+
+    If lst Is Nothing Then Return "UNKNOWN"
+    If lst.Count = 0 Then Return "UNKNOWN"
+
+    Dim seen As New System.Collections.Generic.Dictionary(Of String, Boolean)
+    Dim result As String = ""
+
+    For Each item As String In lst
+
+        If Not seen.ContainsKey(item) Then
+
+            seen.Add(item, True)
+
+            If result <> "" Then result &= ", "
+            result &= item
+
+        End If
+
+    Next
+
+    Return result
+
+End Function
+
+
+Function GetBestInitialSourceFile( _
+    ByVal targetTitle As String, _
+    ByVal parentTitle As String, _
+    ByVal allowActiveDoc As Boolean) As String
+
+    If allowActiveDoc Then
+
+        If StringsEqual(GetDocumentTitle(ThisDoc.Document), targetTitle) Then
+            Try
+                Return ThisDoc.Document.FullFileName
+            Catch
+            End Try
+        End If
+
+    End If
+
+    Dim filePath As String = ""
+
+    If Trim(parentTitle) <> "" Then
+        filePath = FindFirstChildOccurrenceFileInsideParent(ThisDoc.Document.ComponentDefinition.Occurrences, parentTitle, targetTitle)
+        If filePath <> "" Then Return filePath
+    End If
+
+    Return FindFirstOccurrenceFileByTitle(ThisDoc.Document.ComponentDefinition.Occurrences, targetTitle)
+
+End Function
+
+
+'====================================================
+' ACTIVATE DOCUMENT FOR VAULT
+'====================================================
+Sub ActivateDocumentForVault(ByVal oDoc As Document)
+
+    If oDoc Is Nothing Then Exit Sub
+
+    Try
+        oDoc.Activate()
+    Catch
+    End Try
+
+    Try
+        ThisApplication.ActiveView.Update()
+    Catch
+    End Try
+
+End Sub
+
+
+'====================================================
+' STORE CREATED CHILD FILE
+'
+' Stores every child file created by SaveAsCore().
+'
+' Important:
+'   - Stores the real file path, not uppercase path.
+'   - Uses uppercase only for duplicate checking.
+'   - Existing Vault files are never added.
+'====================================================
+Sub StoreCreatedChildFile(ByVal filePath As String)
+
+    Try
+
+        If Trim(filePath) = "" Then Exit Sub
+
+        Dim existingList As String = ""
+
+        Try
+            existingList = CStr(SharedVariable("DriveConfig_CreatedChildFiles"))
+        Catch
+            existingList = ""
+        End Try
+
+        Dim cleanPath As String = Trim(filePath)
+        Dim checkList As String = UCase(existingList)
+        Dim checkPath As String = "|" & UCase(cleanPath) & "|"
+
+        If InStr(checkList, checkPath) = 0 Then
+            existingList &= "|" & cleanPath & "|"
+        End If
+
+        SharedVariable("DriveConfig_CreatedChildFiles") = existingList
+
+    Catch
+    End Try
+
+End Sub
+
+
+'====================================================
+' GET CONFIGURED COMPONENT PART NUMBER
+'
+' Reads DriveConfig_PN_* for a component.
+'====================================================
+Function GetConfiguredComponentPartNumber(ByVal componentName As String) As String
+
+    Try
+
+        Dim key As String = GetConfiguratorComponentKey(componentName)
+
+        If SharedVariable.Exists("DriveConfig_PN_" & key) Then
+            Return Trim(CStr(SharedVariable("DriveConfig_PN_" & key)))
+        End If
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+'====================================================
+' STORE CREATED PROPERTY TASK
+'
+' Stores:
+'   Target Label
+'   New Model File
+'   New Part Number
+'
+' Property writes happen later, after all replacements.
+'====================================================
+Sub StoreCreatedPropertyTask( _
+    ByVal targetLabel As String, _
+    ByVal newModelFile As String, _
+    ByVal newPartNumber As String)
+
+    Try
+
+        If Trim(targetLabel) = "" Then Exit Sub
+        If Trim(newModelFile) = "" Then Exit Sub
+        If Trim(newPartNumber) = "" Then Exit Sub
+
+        Dim existingList As String = ""
+
+        Try
+            existingList = CStr(SharedVariable("DriveConfig_CreatedPropertyTasks"))
+        Catch
+            existingList = ""
+        End Try
+
+        Dim rowSep As String = Chr(30)
+        Dim colSep As String = Chr(31)
+
+        Dim newRow As String = _
+            Trim(targetLabel) & colSep & _
+            Trim(newModelFile) & colSep & _
+            Trim(newPartNumber)
+
+        If InStr(existingList, newRow) = 0 Then
+
+            If Trim(existingList) <> "" Then
+                existingList &= rowSep
+            End If
+
+            existingList &= newRow
+
+        End If
+
+        SharedVariable("DriveConfig_CreatedPropertyTasks") = existingList
+
+    Catch
+    End Try
+
+End Sub
+
+'====================================================
+' PROCESS CREATED PROPERTY TASKS
+'
+' Runs after Push Parameters.
+'
+' For every newly created model:
+'   1. Gets the loaded document or opens it visibly.
+'   2. Activates it to guarantee a document tab.
+'   3. Writes Part Number and Description.
+'   4. Updates the model.
+'   5. Saves the model.
+'====================================================
+Sub ProcessCreatedPropertyTasks(ByRef swapReport As String)
+
+    Try
+
+        Dim taskList As String = ""
+
+        Try
+
+            If SharedVariable.Exists( _
+                "DriveConfig_CreatedPropertyTasks") Then
+
+                taskList = CStr( _
+                    SharedVariable( _
+                        "DriveConfig_CreatedPropertyTasks"))
+
+            End If
+
+        Catch
+
+            taskList = ""
+
+        End Try
+
+        If Trim(taskList) = "" Then
+
+            swapReport &= _
+                "PROPERTIES : No created property tasks found." & _
+                vbCrLf
+
+            Exit Sub
+
+        End If
+
+        Dim rowSep As String = Chr(30)
+        Dim colSep As String = Chr(31)
+
+        Dim rows() As String = Split(taskList, rowSep)
+
+        Dim processedPaths As New _
+            System.Collections.Generic.Dictionary( _
+                Of String, Boolean)
+
+        For Each taskRow As String In Rows
+
+            Try
+
+                If Trim(taskRow) = "" Then Continue For
+
+                Dim cols() As String = Split(taskRow, colSep)
+
+                If UBound(cols) < 2 Then
+
+                    swapReport &= _
+                        "PROPERTIES : Invalid property task row." & _
+                        vbCrLf
+
+                    Continue For
+
+                End If
+
+                Dim targetLabel As String = Trim(cols(0))
+                Dim newModelFile As String = Trim(cols(1))
+                Dim newPartNumber As String = Trim(cols(2))
+
+                If targetLabel = "" Then Continue For
+                If newModelFile = "" Then Continue For
+                If newPartNumber = "" Then Continue For
+
+                Dim pathKey As String = UCase(newModelFile)
+
+                If processedPaths.ContainsKey(pathKey) Then
+                    Continue For
+                End If
+
+                processedPaths.Add(pathKey, True)
+
+                If Not System.IO.File.Exists(newModelFile) Then
+
+                    swapReport &= _
+                        "PROPERTIES : File not found [" & _
+                        newModelFile & _
+                        "]" & _
+                        vbCrLf
+
+                    Continue For
+
+                End If
+
+                Dim modelDoc As Document = _
+                    GetOpenDocumentByFullFileName(newModelFile)
+
+                '====================================================
+                ' OPEN VISIBLY IF NOT ALREADY LOADED
+                '
+                ' True is intentionally used for OpenVisible.
+                '====================================================
+                If modelDoc Is Nothing Then
+
+                    modelDoc = _
+                        ThisApplication.Documents.Open( _
+                            newModelFile, _
+                            False)
+
+                End If
+
+                If modelDoc Is Nothing Then
+
+                    swapReport &= _
+                        "PROPERTIES : Could not open [" & _
+                        targetLabel & _
+                        "] [" & _
+                        newModelFile & _
+                        "]" & _
+                        vbCrLf
+
+                    Continue For
+
+                End If
+
+                '====================================================
+                ' WRITE NEW-FILE PROPERTIES
+                '====================================================
+                ApplyPartNumberAndGeneratedDescription( _
+                    modelDoc, _
+                    targetLabel, _
+                    newPartNumber)
+
+                '====================================================
+                ' UPDATE MODEL
+                '====================================================
+                Try
+
+                    If modelDoc.DocumentType = _
+                        DocumentTypeEnum.kPartDocumentObject Then
+
+                        CType( _
+                            modelDoc, _
+                            PartDocument).Update2(True)
+
+                    ElseIf modelDoc.DocumentType = _
+                        DocumentTypeEnum.kAssemblyDocumentObject Then
+
+                        CType( _
+                            modelDoc, _
+                            AssemblyDocument).Update2(True)
+
+                    End If
+
+                Catch exUpdate As Exception
+
+                    swapReport &= _
+                        "PROPERTIES : Update warning [" & _
+                        targetLabel & _
+                        "] - " & _
+                        exUpdate.Message & _
+                        vbCrLf
+
+                End Try
+
+                '====================================================
+                ' SAVE MODEL
+                '====================================================
+                Try
+
+                    modelDoc.Save2(True)
+
+                Catch
+
+                    Try
+
+                        modelDoc.Save()
+
+                    Catch exSave As Exception
+
+                        swapReport &= _
+                            "PROPERTIES : Save warning [" & _
+                            targetLabel & _
+                            "] - " & _
+                            exSave.Message & _
+                            vbCrLf
+
+                    End Try
+
+                End Try
+
+				swapReport &= _
+				    "PROPERTIES : Wrote PN/Description [" & _
+				    targetLabel & _
+				    "] [" & _
+				    newPartNumber & _
+				    "]" & _
+				    vbCrLf
+
+                '====================================================
+                ' DO NOT CLOSE modelDoc
+                '====================================================
+
+            Catch exRow As Exception
+
+                swapReport &= _
+                    "PROPERTIES : One property task failed - " & _
+                    exRow.Message & _
+                    vbCrLf
+
+            End Try
+
+        Next
+
+    Catch ex As Exception
+
+        swapReport &= _
+            "PROPERTIES : ProcessCreatedPropertyTasks failed - " & _
+            ex.Message & _
+            vbCrLf
+
+    End Try
+
+End Sub
+
+'====================================================
+' STORE CREATED DRAWING TASK
+'
+' Stores:
+'   Target Label
+'   New Model File
+'   Source Model File
+'
+' Drawing creation happens later, after all replacements.
+'====================================================
+Sub StoreCreatedDrawingTask( _
+    ByVal targetLabel As String, _
+    ByVal newModelFile As String, _
+    ByVal sourceModelFile As String)
+
+    Try
+
+        If Trim(targetLabel) = "" Then Exit Sub
+        If Trim(newModelFile) = "" Then Exit Sub
+        If Trim(sourceModelFile) = "" Then Exit Sub
+
+        Dim existingList As String = ""
+
+        Try
+            existingList = CStr(SharedVariable("DriveConfig_CreatedDrawingTasks"))
+        Catch
+            existingList = ""
+        End Try
+
+        Dim rowSep As String = Chr(30)
+        Dim colSep As String = Chr(31)
+
+        Dim newRow As String = _
+            Trim(targetLabel) & colSep & _
+            Trim(newModelFile) & colSep & _
+            Trim(sourceModelFile)
+
+        If InStr(existingList, newRow) = 0 Then
+
+            If Trim(existingList) <> "" Then
+                existingList &= rowSep
+            End If
+
+            existingList &= newRow
+
+        End If
+
+        SharedVariable("DriveConfig_CreatedDrawingTasks") = existingList
+
+    Catch
+    End Try
+
+End Sub
+
+
+'====================================================
+' OPEN ALL CREATED MODEL FILES AND KEEP THEM OPEN
+'
+' This is the only routine that creates visible tabs
+' for newly created child models.
+'
+' No created model is closed.
+'====================================================
+Sub OpenAllCreatedFilesAndKeepOpen( _
+    ByRef swapReport As String)
+
+    Dim createdList As String = ""
+
+    Try
+
+        If SharedVariable.Exists( _
+            "DriveConfig_CreatedChildFiles") Then
+
+            createdList = _
+                CStr(SharedVariable( _
+                    "DriveConfig_CreatedChildFiles"))
+
+        End If
+
+    Catch
+
+        createdList = ""
+
+    End Try
+
+    If Trim(createdList) = "" Then
+
+        swapReport &= _
+            "OPEN FILES : No newly created child files." & _
+            vbCrLf
+
+        Exit Sub
+
+    End If
+
+    Dim fileItems() As String = _
+        Split(createdList, "|")
+
+    Dim processedPaths As New _
+        System.Collections.Generic.Dictionary( _
+            Of String, Boolean)
+
+    Dim openedCount As Integer = 0
+
+    For Each rawPath As String In fileItems
+
+        Dim filePath As String = Trim(rawPath)
+
+        If filePath = "" Then Continue For
+
+        Try
+
+            Dim pathKey As String = ""
+
+            Try
+
+                pathKey = _
+                    UCase(System.IO.Path.GetFullPath( _
+                        filePath))
+
+            Catch
+
+                pathKey = UCase(filePath)
+
+            End Try
+
+            If processedPaths.ContainsKey(pathKey) Then
+                Continue For
+            End If
+
+            processedPaths.Add(pathKey, True)
+
+            If Not System.IO.File.Exists(filePath) Then
+
+                swapReport &= _
+                    "OPEN FILES : File not found [" & _
+                    filePath & _
+                    "]" & _
+                    vbCrLf
+
+                Continue For
+
+            End If
+
+            Dim createdDoc As Document = _
+                GetOpenDocumentByFullFileName( _
+                    filePath)
+
+            '================================================
+            ' NOT LOADED:
+            ' OpenVisible = True
+            '================================================
+            If createdDoc Is Nothing Then
+
+                createdDoc = _
+                    ThisApplication.Documents.Open( _
+                        filePath, _
+                        True)
+
+            End If
+
+            If createdDoc Is Nothing Then
+
+                swapReport &= _
+                    "OPEN FILES : Could not load [" & _
+                    filePath & _
+                    "]" & _
+                    vbCrLf
+
+                Continue For
+
+            End If
+
+            '================================================
+            ' ALREADY REFERENCE-LOADED:
+            ' Add a document view if no visible view exists.
+            '================================================
+            Try
+
+                If createdDoc.Views.Count = 0 Then
+                    createdDoc.Views.Add()
+                End If
+
+            Catch exView As Exception
+
+                swapReport &= _
+                    "OPEN FILES : View warning [" & _
+                    createdDoc.DisplayName & _
+                    "] - " & _
+                    exView.Message & _
+                    vbCrLf
+
+            End Try
+
+            '================================================
+            ' ACTIVATE VISIBLE VIEW OR DOCUMENT
+            '================================================
+            Try
+
+                If createdDoc.Views.Count > 0 Then
+
+                    createdDoc.Views.Item(1).Visible = True
+                    createdDoc.Views.Item(1).Activate()
+
+                Else
+
+                    createdDoc.Activate()
+
+                End If
+
+            Catch
+
+                Try
+                    createdDoc.Activate()
+                Catch exActivate As Exception
+
+                    swapReport &= _
+                        "OPEN FILES : Activate warning [" & _
+                        createdDoc.DisplayName & _
+                        "] - " & _
+                        exActivate.Message & _
+                        vbCrLf
+
+                End Try
+
+            End Try
+
+            openedCount += 1
+
+            swapReport &= _
+                "OPEN FILES : Visible and kept open [" & _
+                createdDoc.DisplayName & _
+                "]" & _
+                vbCrLf
+
+            'Do not close createdDoc.
+
+        Catch exFile As Exception
+
+            swapReport &= _
+                "OPEN FILES : Failed [" & _
+                filePath & _
+                "] - " & _
+                exFile.Message & _
+                vbCrLf
+
+        End Try
+
+    Next
+
+    swapReport &= _
+        "OPEN FILES : Created model tabs open = " & _
+        openedCount & _
+        vbCrLf
+
+End Sub
+
+
+'====================================================
+' PROCESS CREATED DRAWING TASKS
+'
+' Creates drawings after all model files and references
+' have been created, replaced, updated, and saved.
+'
+' Created model files are intentionally left open.
+' This supports the desired workflow:
+'
+'   create -> save -> leave open -> replace -> drawing/check-in
+'====================================================
+Sub ProcessCreatedDrawingTasks(ByRef swapReport As String)
+
+    Try
+
+        Dim taskList As String = ""
+
+        Try
+            taskList = CStr(SharedVariable("DriveConfig_CreatedDrawingTasks"))
+        Catch
+            taskList = ""
+        End Try
+
+        If Trim(taskList) = "" Then Exit Sub
+
+        Dim rowSep As String = Chr(30)
+        Dim colSep As String = Chr(31)
+
+        Dim rows() As String = Split(taskList, rowSep)
+
+        For Each Row As String In Rows
+
+            If Trim(Row) <> "" Then
+
+                Dim cols() As String = Split(Row, colSep)
+
+                If UBound(cols) >= 2 Then
+
+                    Dim targetLabel As String = cols(0)
+                    Dim newModelFile As String = cols(1)
+                    Dim sourceModelFile As String = cols(2)
+
+                    If System.IO.File.Exists(newModelFile) Then
+
+                        Dim modelDoc As Document = GetOpenDocumentByFullFileName(newModelFile)
+
+                        If modelDoc Is Nothing Then
+                            modelDoc = ThisApplication.Documents.Open(newModelFile, False)
+                        End If
+
+                        If Not modelDoc Is Nothing Then
+
+                            CreateDriveGeneratorDrawing( _
+                                modelDoc, _
+                                targetLabel, _
+                                swapReport, _
+                                sourceModelFile)
+
+
+                            '====================================================
+                            ' DO NOT CLOSE modelDoc
+                            '
+                            ' Created model files should remain open for review
+                            ' and Vault check-in.
+                            '====================================================
+
+                        End If
+
+                    Else
+
+                        swapReport &= _
+                            "DRAWING : Skipped [" & _
+                            targetLabel & _
+                            "] because model file was not found [" & _
+                            newModelFile & _
+                            "]" & _
+                            vbCrLf
+
+                    End If
+
+                End If
+
+            End If
+
+        Next
+
+    Catch ex As Exception
+
+        swapReport &= "DRAWING : ProcessCreatedDrawingTasks failed - " & ex.Message & vbCrLf
+
+    End Try
+
+End Sub

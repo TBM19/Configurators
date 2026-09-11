@@ -1,0 +1,184 @@
+﻿Sub Main()
+
+    Dim oDoc As Document = ThisDoc.Document
+    Dim oParams As Parameters = oDoc.ComponentDefinition.Parameters
+	
+	Dim pShoeStyle As String = SafeiProp("Shoe_Style")
+    Dim pQuantityOfShoes As String = SafeiProp("Quantity_of_Shoes")
+    Dim pSC As String = SafeiProp("SC")
+    Dim pOutsideDimension As String = SafeiProp("Outside_Dimension")
+    Dim pInsideDimension As String = SafeiProp("Inside_Dimension")
+	Dim pCC As String = SafeiProp("CC")
+
+    Dim setsSupportsParam As Inventor.Parameter = FindParameter(oParams, "Sets_Supports")
+    Dim setsSupportHoleParam As Inventor.Parameter = FindParameter(oParams, "Sets_Supports_Holes")
+
+    If pQuantityOfShoes = "" Then
+        MessageBox.Show("iProperty not found or blank: Quantity_of_Shoes")
+        Exit Sub
+    End If
+
+    If pSC = "" Then
+        MessageBox.Show("iProperty not found or blank: SC")
+        Exit Sub
+    End If
+
+    If pOutsideDimension = "" Then
+        MessageBox.Show("iProperty not found or blank: Outside_Dimension")
+        Exit Sub
+    End If
+
+    If pInsideDimension = "" Then
+        MessageBox.Show("iProperty not found or blank: Inside_Dimension")
+        Exit Sub
+    End If
+
+    If setsSupportsParam Is Nothing Then
+        MessageBox.Show("Parameter not found: Sets_Supports")
+        Exit Sub
+    End If
+
+    If setsSupportHoleParam Is Nothing Then
+        MessageBox.Show("Parameter not found: Sets_Supports_Holes")
+        Exit Sub
+    End If
+
+    Dim qty As Integer = CInt(Val(pQuantityOfShoes))
+    Dim scValue As Double = Val(pSC)
+	Dim ccValue As Double = Val(pCC)
+    Dim outsideDim As Double = Val(pOutsideDimension)
+    Dim insideDim As Double = Val(pInsideDimension)
+
+
+    If scValue = 0 Then
+        MessageBox.Show("SC cannot be 0.")
+        Exit Sub
+    End If
+
+    Dim supportHole As Double
+
+    If qty Mod 2 = 1 Then
+        supportHole = 2
+    Else
+        supportHole = 2.5
+    End If
+
+	
+    Do While supportHole * scValue < ccValue + 5.125
+        supportHole = supportHole + 1
+    Loop
+
+    If setsSupportHoleParam.Units = "ul" Then
+        setsSupportHoleParam.Expression = supportHole.ToString(System.Globalization.CultureInfo.InvariantCulture)
+    Else
+        setsSupportHoleParam.Expression = supportHole.ToString(System.Globalization.CultureInfo.InvariantCulture) & " in"
+    End If
+	
+	'====================================================
+	' SPECIAL CASE - WIDE SHOE 16 HOLE
+	'====================================================
+	If Trim(pShoeStyle) = "Wide Shoe 16 Hole (WS16H)" Then
+	
+	    If setsSupportsParam.Units = "ul" Then
+	        setsSupportsParam.Expression = "23.34375"
+	    Else
+	        setsSupportsParam.Expression = "23.34375 in"
+	    End If
+	
+	    RuleParametersOutput()
+	    InventorVb.DocumentUpdate()
+	    Exit Sub
+	
+	End If
+	
+
+    Dim targetLocation As Double
+    targetLocation = ((outsideDim - insideDim) / 4) + (insideDim / 2)
+
+    Dim bestSupportCount As Double = 0
+    Dim bestSupportLocation As Double = 0
+    Dim bestDifference As Double = 999999999
+
+    Dim debugText As String = ""
+    debugText &= "INCH DEBUG VALUES" & vbCrLf & vbCrLf
+    debugText &= "Quantity_of_Shoes = " & qty.ToString() & vbCrLf
+    debugText &= "SC = " & Format(scValue, "0.###") & " in" & vbCrLf
+    debugText &= "Outside_Dimension = " & Format(outsideDim, "0.###") & " in" & vbCrLf
+    debugText &= "Inside_Dimension = " & Format(insideDim, "0.###") & " in" & vbCrLf
+    debugText &= "Target Location = " & Format(targetLocation, "0.###") & " in" & vbCrLf
+    debugText &= "Sets_Supports_Holes = " & supportHole.ToString() & vbCrLf & vbCrLf
+    debugText &= "OPTIONS CHECKED:" & vbCrLf
+
+    For offset As Integer = 1 To 3
+
+        Dim testSupportCount As Double
+        testSupportCount = supportHole + offset
+
+        Dim testSupportLocation As Double
+        testSupportLocation = testSupportCount * scValue
+
+        Dim difference As Double
+        difference = Math.Abs(testSupportLocation - targetLocation)
+
+        debugText &= "+ " & offset.ToString() & _
+                     "  Count = " & testSupportCount.ToString() & _
+                     "  Location = " & Format(testSupportLocation, "0.###") & " in" & _
+                     "  Difference = " & Format(difference, "0.###") & " in" & vbCrLf
+
+        If difference < bestDifference Then
+            bestDifference = difference
+            bestSupportCount = testSupportCount
+            bestSupportLocation = testSupportLocation
+        ElseIf difference = bestDifference And testSupportCount < bestSupportCount Then
+            bestSupportCount = testSupportCount
+            bestSupportLocation = testSupportLocation
+        End If
+
+    Next
+
+    debugText &= vbCrLf
+    debugText &= "SELECTED:" & vbCrLf
+    debugText &= "Best Support Count = " & bestSupportCount.ToString() & vbCrLf
+    debugText &= "Best Support Location = " & Format(bestSupportLocation, "0.###") & " in" & vbCrLf
+    debugText &= "Best Difference = " & Format(bestDifference, "0.###") & " in"
+
+    MessageBox.Show(debugText)
+
+    If setsSupportsParam.Units = "ul" Then
+        setsSupportsParam.Expression = bestSupportCount.ToString(System.Globalization.CultureInfo.InvariantCulture)
+    Else
+        setsSupportsParam.Expression = bestSupportLocation.ToString(System.Globalization.CultureInfo.InvariantCulture) & " in"
+    End If
+
+    RuleParametersOutput()
+    InventorVb.DocumentUpdate()
+
+End Sub
+
+
+'====================================================
+' FIND PARAMETER
+'====================================================
+Function FindParameter(oParams As Parameters, paramName As String) As Inventor.Parameter
+
+    For Each p As Inventor.Parameter In oParams
+        If LCase(Trim(p.Name)) = LCase(Trim(paramName)) Then
+            Return p
+        End If
+    Next
+
+    Return Nothing
+
+End Function
+
+
+'====================================================
+' SAFE iProperty READ
+'====================================================
+Function SafeiProp(propName As String) As String
+    Try
+        Return CStr(iProperties.Value("Custom", propName))
+    Catch
+        Return ""
+    End Try
+End Function

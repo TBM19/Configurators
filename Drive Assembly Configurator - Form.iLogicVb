@@ -1,0 +1,4023 @@
+﻿' <FireOthersImmediately>False</FireOthersImmediately>
+AddReference "System.Windows.Forms"
+AddReference "System.Drawing"
+Imports System
+Imports System.Collections.Generic
+Imports System.Drawing
+Imports System.Windows.Forms
+Imports Inventor
+'==================================================
+' DRIVE ASSEMBLY CONFIGURATOR FORM
+'==================================================
+' Purpose:
+'   Builds a live configurator form from exposed user parameters.
+'   Updates parameters when controls change.
+'   Runs a live Vault/component search.
+'   Shows Found PN, New PN, and Save Location for each component.
+'
+' Notes:
+'   This rule does not create parts directly.
+'   It sends the user inputs through SharedVariable values.
+'
+' External rules used:
+'   Drive Assembly Configurator - Searches Replaces and Creates Drawings
+'   Drive Assembly Configurator - Runs Configurator
+'==================================================
+
+Sub Main()
+
+    '==================================================
+    ' DOCUMENT CHECK
+    '==================================================
+
+    Dim oDoc As Document = ThisDoc.Document
+
+    If oDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject AndAlso _
+       oDoc.DocumentType <> DocumentTypeEnum.kPartDocumentObject Then
+
+        MessageBox.Show( _
+            "This rule must be run from a part or assembly document.", _
+            "Drive Configurator")
+
+        Exit Sub
+
+    End If
+
+
+    '==================================================
+    ' GET USER PARAMETERS
+    '==================================================
+
+    Dim oParams As UserParameters = GetUserParameters(oDoc)
+
+    If oParams Is Nothing Then
+
+        MessageBox.Show( _
+            "Could not read user parameters from this document.", _
+            "Drive Configurator")
+
+        Exit Sub
+
+    End If
+
+
+    '==================================================
+    ' FORM STATE
+    '==================================================
+    ' formState replaces the old ByRef isUpdating Boolean.
+    ' This avoids lambda / AddHandler problems.
+    '==================================================
+
+    Dim FormState As New FormState()
+
+    Dim paramControls As New System.Collections.Generic.Dictionary(Of String, System.Windows.Forms.Control)
+
+    Dim componentRows As New System.Collections.Generic.List(Of ComponentWorkspaceRow)
+
+
+	'==================================================
+	' FORM SETUP
+	'==================================================
+	' Robust DPI-safe layout version.
+	'
+	' IMPORTANT:
+	' This version does NOT use SplitContainer.
+	' This version also does NOT use a main TableLayoutPanel.
+	'
+	' Reason:
+	'   SplitContainer caused SplitterDistance errors.
+	'   Main TableLayoutPanel made the right workspace take over
+	'   and caused the left parameter side to disappear.
+	'
+	' Layout:
+	'   Form
+	'     Main panel
+	'       Left scroll panel for parameters
+	'       Right flow panel for component workspace
+	'     Bottom button panel
+	'
+	' The left and right panels are positioned manually during resize.
+	'==================================================
+
+	Dim frm As New System.Windows.Forms.Form()
+
+	frm.Text = "Drive Assembly Configurator"
+
+	'==================================================
+	' DPI-AWARE FORM CONFIGURATION
+	'==================================================
+	
+	frm.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
+	frm.AutoScaleDimensions = New System.Drawing.SizeF(96.0!, 96.0!)
+	
+	frm.Font = New System.Drawing.Font( _
+	    "Segoe UI", _
+	    9.0!, _
+	    System.Drawing.FontStyle.Regular, _
+	    System.Drawing.GraphicsUnit.Point)
+	
+	frm.StartPosition = _
+	    System.Windows.Forms.FormStartPosition.CenterScreen
+	
+	frm.FormBorderStyle = _
+	    System.Windows.Forms.FormBorderStyle.Sizable
+	
+	frm.MaximizeBox = True
+	frm.MinimizeBox = True
+	
+	'Use the working area of the monitor where Inventor is displayed.
+	Dim workingArea As System.Drawing.Rectangle = _
+	    System.Windows.Forms.Screen.FromControl(frm).WorkingArea
+	
+	If ThisApplication.MainFrameHWND <> 0 Then
+	
+	    Try
+	
+	        Dim inventorScreen As System.Windows.Forms.Screen = _
+	            System.Windows.Forms.Screen.FromHandle( _
+	                New System.IntPtr(ThisApplication.MainFrameHWND))
+	
+	        workingArea = inventorScreen.WorkingArea
+	
+	    Catch
+	    End Try
+	
+	End If
+	
+	'Keep the form inside the monitor working area.
+	Dim desiredWidth As Integer = _
+	    CInt(workingArea.Width * 0.92)
+	
+	Dim desiredHeight As Integer = _
+	    CInt(workingArea.Height * 0.88)
+	
+	Dim minimumWidth As Integer = _
+	    Math.Min(1000, workingArea.Width)
+	
+	Dim minimumHeight As Integer = _
+	    Math.Min(650, workingArea.Height)
+	
+	frm.MinimumSize = New System.Drawing.Size( _
+	    minimumWidth, _
+	    minimumHeight)
+	
+	frm.Size = New System.Drawing.Size( _
+	    Math.Max(minimumWidth, desiredWidth), _
+	    Math.Max(minimumHeight, desiredHeight))
+
+
+'==================================================
+' ROOT LAYOUT
+'==================================================
+' Row 0 contains the main form workspace.
+' Row 1 contains the buttons.
+'
+' Using a TableLayoutPanel prevents the button panel
+' from overlapping or reducing the workspace incorrectly.
+'==================================================
+
+Dim rootLayout As New System.Windows.Forms.TableLayoutPanel()
+
+rootLayout.Dock = System.Windows.Forms.DockStyle.Fill
+rootLayout.ColumnCount = 1
+rootLayout.RowCount = 2
+rootLayout.Margin = New System.Windows.Forms.Padding(0)
+rootLayout.Padding = New System.Windows.Forms.Padding(0)
+
+rootLayout.ColumnStyles.Add( _
+    New System.Windows.Forms.ColumnStyle( _
+        System.Windows.Forms.SizeType.Percent, _
+        100.0!))
+
+rootLayout.RowStyles.Add( _
+    New System.Windows.Forms.RowStyle( _
+        System.Windows.Forms.SizeType.Percent, _
+        100.0!))
+
+rootLayout.RowStyles.Add( _
+    New System.Windows.Forms.RowStyle( _
+        System.Windows.Forms.SizeType.AutoSize))
+
+frm.Controls.Add(rootLayout)
+
+
+	'==================================================
+	' MAIN WORKSPACE LAYOUT
+	'==================================================
+	' Column 0 = parameter side
+	' Column 1 = thin separator
+	' Column 2 = component workspace
+	'
+	' No manual Left, Top, Width, or Height calculations.
+	'==================================================
+	
+	Dim mainLayout As New System.Windows.Forms.TableLayoutPanel()
+	
+	mainLayout.Dock = System.Windows.Forms.DockStyle.Fill
+	mainLayout.ColumnCount = 3
+	mainLayout.RowCount = 1
+	mainLayout.Margin = New System.Windows.Forms.Padding(0)
+	mainLayout.Padding = New System.Windows.Forms.Padding(10)
+	mainLayout.AutoScroll = False
+	mainLayout.GrowStyle = _
+	    System.Windows.Forms.TableLayoutPanelGrowStyle.FixedSize
+	
+	mainLayout.ColumnStyles.Add( _
+	    New System.Windows.Forms.ColumnStyle( _
+	        System.Windows.Forms.SizeType.Percent, _
+	        34.0!))
+	
+	mainLayout.ColumnStyles.Add( _
+	    New System.Windows.Forms.ColumnStyle( _
+	        System.Windows.Forms.SizeType.Absolute, _
+	        1.0!))
+	
+	mainLayout.ColumnStyles.Add( _
+	    New System.Windows.Forms.ColumnStyle( _
+	        System.Windows.Forms.SizeType.Percent, _
+	        66.0!))
+	
+	mainLayout.RowStyles.Add( _
+	    New System.Windows.Forms.RowStyle( _
+	        System.Windows.Forms.SizeType.Percent, _
+	        100.0!))
+	
+	rootLayout.Controls.Add(mainLayout, 0, 0)
+
+
+	'==================================================
+	' BOTTOM BUTTON AREA
+	'==================================================
+	
+	Dim bottomPanel As New System.Windows.Forms.Panel()
+	
+	bottomPanel.Dock = System.Windows.Forms.DockStyle.Fill
+	bottomPanel.AutoSize = True
+	bottomPanel.AutoSizeMode = _
+	    System.Windows.Forms.AutoSizeMode.GrowAndShrink
+	
+	bottomPanel.Padding = New System.Windows.Forms.Padding(10, 6, 10, 8)
+	bottomPanel.Margin = New System.Windows.Forms.Padding(0)
+	bottomPanel.MinimumSize = New System.Drawing.Size(0, 48)
+	
+	rootLayout.Controls.Add(bottomPanel, 0, 1)
+
+
+	'==================================================
+	' BUTTON FLOW LAYOUT
+	'==================================================
+
+	Dim buttonFlow As New System.Windows.Forms.FlowLayoutPanel()
+	
+	buttonFlow.Dock = System.Windows.Forms.DockStyle.Fill
+	buttonFlow.FlowDirection = _
+	    System.Windows.Forms.FlowDirection.LeftToRight
+	
+	buttonFlow.WrapContents = False
+	buttonFlow.AutoScroll = True
+	buttonFlow.AutoSize = True
+	buttonFlow.AutoSizeMode = _
+	    System.Windows.Forms.AutoSizeMode.GrowAndShrink
+	
+	buttonFlow.Padding = New System.Windows.Forms.Padding(0)
+	buttonFlow.Margin = New System.Windows.Forms.Padding(0)
+	
+	bottomPanel.Controls.Add(buttonFlow)
+
+
+	'==================================================
+	' BUTTONS
+	'==================================================
+
+	Dim btnApply As New System.Windows.Forms.Button()
+	btnApply.Text = "Runs Configurator"
+	btnApply.Width = 140
+	btnApply.Height = 30
+	btnApply.Margin = New System.Windows.Forms.Padding(0, 0, 10, 8)
+	buttonFlow.Controls.Add(btnApply)
+
+	Dim btnVerify As New System.Windows.Forms.Button()
+	btnVerify.Text = "Verify"
+	btnVerify.Width = 100
+	btnVerify.Height = 30
+	btnVerify.Margin = New System.Windows.Forms.Padding(0, 0, 10, 8)
+	buttonFlow.Controls.Add(btnVerify)
+
+	Dim btnClose As New System.Windows.Forms.Button()
+	btnClose.Text = "Close"
+	btnClose.Width = 100
+	btnClose.Height = 30
+	btnClose.Margin = New System.Windows.Forms.Padding(0, 0, 25, 8)
+	buttonFlow.Controls.Add(btnClose)
+
+	Dim btnOpenTemplate As New System.Windows.Forms.Button()
+	btnOpenTemplate.Text = "Open Template Drive Assembly"
+	btnOpenTemplate.Width = 250
+	btnOpenTemplate.Height = 30
+	btnOpenTemplate.Margin = New System.Windows.Forms.Padding(0, 0, 10, 8)
+	buttonFlow.Controls.Add(btnOpenTemplate)
+
+	Dim btnRXGuidelines As New System.Windows.Forms.Button()
+	btnRXGuidelines.Text = "RX Design Guidelines"
+	btnRXGuidelines.Width = 180
+	btnRXGuidelines.Height = 30
+	btnRXGuidelines.Margin = New System.Windows.Forms.Padding(0, 0, 10, 8)
+	buttonFlow.Controls.Add(btnRXGuidelines)
+
+
+	'==================================================
+	' LEFT PARAMETER SCROLL AREA
+	'==================================================
+	
+	Dim leftScroll As New System.Windows.Forms.Panel()
+	
+	leftScroll.Dock = System.Windows.Forms.DockStyle.Fill
+	leftScroll.AutoScroll = True
+	leftScroll.Padding = New System.Windows.Forms.Padding(8)
+	leftScroll.Margin = New System.Windows.Forms.Padding(0, 0, 10, 0)
+	leftScroll.BorderStyle = System.Windows.Forms.BorderStyle.None
+	leftScroll.MinimumSize = New System.Drawing.Size(0, 0)
+	
+	mainLayout.Controls.Add(leftScroll, 0, 0)
+	
+	
+	'==================================================
+	' VERTICAL SEPARATOR
+	'==================================================
+	
+	Dim verticalSeparator As New System.Windows.Forms.Panel()
+	
+	verticalSeparator.Dock = System.Windows.Forms.DockStyle.Fill
+	verticalSeparator.BackColor = System.Drawing.Color.Black
+	verticalSeparator.Margin = New System.Windows.Forms.Padding(0)
+	
+	mainLayout.Controls.Add(verticalSeparator, 1, 0)
+
+
+	'==================================================
+	' LEFT PARAMETER TABLE
+	'==================================================
+	' Column 0 automatically measures the longest label.
+	' Column 1 receives all remaining width.
+	'==================================================
+	
+	Dim parameterTable As New System.Windows.Forms.TableLayoutPanel()
+	
+	parameterTable.Dock = System.Windows.Forms.DockStyle.Top
+	parameterTable.AutoSize = True
+	parameterTable.AutoSizeMode = _
+	    System.Windows.Forms.AutoSizeMode.GrowAndShrink
+	
+	parameterTable.ColumnCount = 2
+	parameterTable.RowCount = 0
+	parameterTable.Padding = New System.Windows.Forms.Padding(0)
+	parameterTable.Margin = New System.Windows.Forms.Padding(0)
+	parameterTable.GrowStyle = _
+	    System.Windows.Forms.TableLayoutPanelGrowStyle.AddRows
+	
+	parameterTable.ColumnStyles.Add( _
+	    New System.Windows.Forms.ColumnStyle( _
+	        System.Windows.Forms.SizeType.AutoSize))
+	
+	parameterTable.ColumnStyles.Add( _
+	    New System.Windows.Forms.ColumnStyle( _
+	        System.Windows.Forms.SizeType.Percent, _
+	        100.0!))
+	
+	leftScroll.Controls.Add(parameterTable)
+
+
+	'==================================================
+	' RIGHT COMPONENT WORKSPACE AREA
+	'==================================================
+	
+	Dim rightFlow As New System.Windows.Forms.FlowLayoutPanel()
+	
+	rightFlow.Dock = System.Windows.Forms.DockStyle.Fill
+	rightFlow.FlowDirection = _
+	    System.Windows.Forms.FlowDirection.TopDown
+	
+	rightFlow.WrapContents = False
+	rightFlow.AutoScroll = True
+	rightFlow.Padding = New System.Windows.Forms.Padding(12, 0, 4, 0)
+	rightFlow.Margin = New System.Windows.Forms.Padding(10, 0, 0, 0)
+	rightFlow.BorderStyle = System.Windows.Forms.BorderStyle.None
+	
+	mainLayout.Controls.Add(rightFlow, 2, 0)
+
+
+
+	'==================================================
+	' RIGHT SIDE COMPONENT WORKSPACE
+	'==================================================
+	' IMPORTANT:
+	' Build this before parameter controls because the
+	' parameter handlers need txtComponentPNReport.
+	'==================================================
+
+	Dim txtComponentPNReport As System.Windows.Forms.TextBox = Nothing
+
+	BuildComponentWorkspace( _
+		rightFlow, _
+		componentRows, _
+		txtComponentPNReport)
+
+	AddBrowseHandlers(componentRows)
+
+
+	'==================================================
+	' LEFT SIDE PARAMETER CONTROLS
+	'==================================================
+
+	BuildParameterControls( _
+		oDoc, _
+		oParams, _
+		parameterTable, _
+		paramControls, _
+		FormState, _
+		componentRows, _
+		txtComponentPNReport)
+
+
+	'==================================================
+	' KEEP RIGHT SIDE WIDTH RESPONSIVE
+	'==================================================
+
+	AddHandler rightFlow.Resize, _
+		Sub(sender As Object, e As EventArgs)
+
+			ResizeComponentWorkspaceRows( _
+				rightFlow, _
+				componentRows, _
+				txtComponentPNReport)
+
+		End Sub
+		
+		
+		AddHandler rightFlow.SizeChanged, _
+    Sub(sender As Object, E As EventArgs)
+
+        rightFlow.BeginInvoke( _
+            New System.Windows.Forms.MethodInvoker( _
+                Sub()
+
+                    ResizeComponentWorkspaceRows( _
+                        rightFlow, _
+                        componentRows, _
+                        txtComponentPNReport)
+
+                End Sub))
+
+    End Sub
+
+
+
+	'==================================================
+	' APPLY BUTTON
+	'==================================================
+
+	AddHandler btnApply.Click, _
+		Sub(sender As Object, e As EventArgs)
+
+			Try
+
+				SaveComponentPNInputsToSharedVariables(componentRows)
+
+				Try
+					SharedVariable("DriveConfig_LiveSearchOnly") = False
+				Catch
+				End Try
+
+				Try
+					SharedVariable("DriveConfig_DescriptionPreviewOnly") = False
+				Catch
+				End Try
+
+				Try
+					SharedVariable("DriveConfig_FormPreviewOnly") = False
+				Catch
+				End Try
+
+				Try
+					oDoc.Activate()
+				Catch
+				End Try
+
+				RunExternalRuleSafe( _
+					"Drive Assembly Configurator\Drive Assembly Configurator - Runs Configurator", _
+					"Drive Assembly Configurator - Runs Configurator", _
+					"Runs Configurator")
+
+				UpdateComponentPartNumberWorkspaceFromShared( _
+					componentRows, _
+					txtComponentPNReport)
+
+			Catch ex As Exception
+
+				MessageBox.Show( _
+					"Failed to run configurator." & vbCrLf & vbCrLf & _
+					ex.Message, _
+					"Drive Configurator")
+
+			End Try
+
+		End Sub
+
+
+	'==================================================
+	' VERIFY BUTTON
+	'==================================================
+
+	AddHandler btnVerify.Click, _
+		Sub(sender As Object, e As EventArgs)
+
+			Try
+
+				ApplyAllControls(oDoc, paramControls)
+				EnforceDynamicRules(oDoc)
+				UpdateDocument(oDoc)
+
+				RefreshFormValues( _
+					oDoc, _
+					paramControls, _
+					FormState)
+
+				Dim report As String = VerifyDriveConfiguration(oDoc)
+
+				If report = "" Then
+
+					MessageBox.Show( _
+						"All configuration properties match.", _
+						"Configuration Check")
+
+				Else
+
+					MessageBox.Show( _
+						report, _
+						"Configuration Mismatches")
+
+				End If
+
+			Catch ex As Exception
+
+				MessageBox.Show( _
+					"Verification failed." & vbCrLf & vbCrLf & _
+					ex.Message, _
+					"Configuration Check")
+
+			End Try
+
+		End Sub
+
+
+	'==================================================
+	' OPEN TEMPLATE DRIVE ASSEMBLY BUTTON
+	'==================================================
+
+	AddHandler btnOpenTemplate.Click, _
+		Sub(sender As Object, e As EventArgs)
+
+			RunExternalRuleSafe( _
+				"Drive Assembly Configurator\Drive Assembly Configurator - Open Template Drive Assembly", _
+				"Drive Assembly Configurator - Open Template Drive Assembly", _
+				"Open Template Drive Assembly")
+
+		End Sub
+
+
+	'==================================================
+	' RX DESIGN GUIDELINES BUTTON
+	'==================================================
+
+	AddHandler btnRXGuidelines.Click, _
+		Sub(sender As Object, e As EventArgs)
+
+			RunExternalRuleSafe( _
+				"Drive Assembly Configurator\RX Design Guidelines", _
+				"RX Design Guidelines", _
+				"RX Design Guidelines")
+
+		End Sub
+
+
+	'==================================================
+	' CLOSE BUTTON
+	'==================================================
+
+	AddHandler btnClose.Click, _
+		Sub(sender As Object, e As EventArgs)
+			frm.Close()
+		End Sub
+
+
+	'==================================================
+	' INITIALIZE FORM DATA
+	'==================================================
+
+	EnforceDynamicRules(oDoc)
+
+	UpdateDocument(oDoc)
+
+	RefreshFormValues( _
+		oDoc, _
+		paramControls, _
+		FormState)
+
+	InitializeConfiguratorData( _
+		oDoc, _
+		componentRows, _
+		txtComponentPNReport)
+
+
+	'==================================================
+	' FINAL LAYOUT REFRESH
+	'==================================================
+	
+	Try
+	
+	    rootLayout.PerformLayout()
+	    mainLayout.PerformLayout()
+	    parameterTable.PerformLayout()
+	    rightFlow.PerformLayout()
+	
+	    ResizeComponentWorkspaceRows( _
+	        rightFlow, _
+	        componentRows, _
+	        txtComponentPNReport)
+	
+	Catch
+	End Try
+	
+	
+	
+	AddHandler frm.Shown, _
+    Sub(sender As Object, E As EventArgs)
+
+        Try
+
+            rootLayout.PerformLayout()
+            mainLayout.PerformLayout()
+            parameterTable.PerformLayout()
+            rightFlow.PerformLayout()
+
+            ResizeComponentWorkspaceRows( _
+                rightFlow, _
+                componentRows, _
+                txtComponentPNReport)
+
+        Catch
+        End Try
+
+    End Sub
+
+
+	'==================================================
+	' SHOW FORM
+	'==================================================
+
+	frm.ShowDialog()
+
+End Sub
+
+
+'==================================================
+' COMPONENT WORKSPACE ROW CLASS
+'==================================================
+
+Class ComponentWorkspaceRow
+
+    Public Title As String
+    Public InputKey As String
+    Public PNKey As String
+    Public FileExtension As String
+
+    Public Panel As System.Windows.Forms.Panel
+
+    'Description is display-only but selectable.
+    Public TxtDescription As System.Windows.Forms.TextBox
+
+    Public TxtPartNumber As System.Windows.Forms.TextBox
+    Public TxtSavePath As System.Windows.Forms.TextBox
+    Public BtnBrowse As System.Windows.Forms.Button
+
+End Class
+
+
+'==================================================
+' FORM STATE
+'==================================================
+' Stores flags used by the form.
+'==================================================
+
+Class FormState
+
+    Public IsUpdating As Boolean = False
+
+End Class
+
+
+'==================================================
+' BUILD PARAMETER CONTROLS
+'==================================================
+
+Sub BuildParameterControls( _
+    ByVal oDoc As Document, _
+    ByVal oParams As UserParameters, _
+    ByVal ParameterTable As System.Windows.Forms.TableLayoutPanel, _
+    ByVal paramControls As System.Collections.Generic.Dictionary(Of String, System.Windows.Forms.Control), _
+    ByVal FormState As FormState, _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    If oParams Is Nothing Then Exit Sub
+    If ParameterTable Is Nothing Then Exit Sub
+    If paramControls Is Nothing Then Exit Sub
+
+    ParameterTable.SuspendLayout()
+
+    Try
+
+        ParameterTable.Controls.Clear()
+        ParameterTable.RowStyles.Clear()
+        ParameterTable.RowCount = 0
+
+        paramControls.Clear()
+
+        For Each oParam As UserParameter In oParams
+
+            Try
+
+                If Not oParam.ExposedAsProperty Then Continue For
+
+                Dim paramName As String = oParam.Name
+                Dim rowIndex As Integer = ParameterTable.RowCount
+
+                ParameterTable.RowCount += 1
+
+                ParameterTable.RowStyles.Add( _
+                    New System.Windows.Forms.RowStyle( _
+                        System.Windows.Forms.SizeType.AutoSize))
+
+                '--------------------------------------------------
+                ' PARAMETER LABEL
+                '--------------------------------------------------
+
+                Dim lbl As New System.Windows.Forms.Label()
+
+                lbl.Text = paramName
+                lbl.AutoSize = True
+                lbl.Anchor = _
+                    System.Windows.Forms.AnchorStyles.Left Or _
+                    System.Windows.Forms.AnchorStyles.Top
+
+                lbl.TextAlign = _
+                    System.Drawing.ContentAlignment.MiddleLeft
+
+                lbl.AutoEllipsis = False
+                lbl.UseMnemonic = False
+                lbl.Margin = New System.Windows.Forms.Padding(0, 7, 12, 7)
+                lbl.Padding = New System.Windows.Forms.Padding(0)
+
+                ParameterTable.Controls.Add(lbl, 0, rowIndex)
+
+                '--------------------------------------------------
+                ' PARAMETER CONTROL
+                '--------------------------------------------------
+
+                Dim options As System.Collections.Generic.List(Of String) = _
+                    GetOptionsForParameter(paramName)
+
+                If options.Count > 0 Then
+
+                    Dim cbo As New System.Windows.Forms.ComboBox()
+
+                    cbo.Name = paramName
+                    cbo.Dock = System.Windows.Forms.DockStyle.Top
+                    cbo.DropDownStyle = _
+                        System.Windows.Forms.ComboBoxStyle.DropDownList
+
+                    cbo.Tag = paramName
+                    cbo.Margin = New System.Windows.Forms.Padding(0, 3, 0, 3)
+                    cbo.MinimumSize = New System.Drawing.Size(120, 0)
+                    cbo.IntegralHeight = True
+
+                    For Each opt As String In options
+                        cbo.Items.Add(opt)
+                    Next
+
+                    AddHandler cbo.SelectedIndexChanged, _
+                        Sub(sender As Object, E As EventArgs)
+
+                            If FormState.IsUpdating Then Exit Sub
+
+                            Dim ctrl As System.Windows.Forms.Control = _
+                                CType(sender, System.Windows.Forms.Control)
+
+                            ApplyOneControlValue( _
+                                oDoc, _
+                                ctrl, _
+                                paramControls, _
+                                FormState, _
+                                componentRows, _
+                                txtComponentPNReport)
+
+                        End Sub
+
+                    ParameterTable.Controls.Add(cbo, 1, rowIndex)
+                    paramControls.Add(paramName, cbo)
+
+                Else
+
+                    Dim txt As New System.Windows.Forms.TextBox()
+
+                    txt.Name = paramName
+                    txt.Dock = System.Windows.Forms.DockStyle.Top
+                    txt.Tag = paramName
+                    txt.Margin = New System.Windows.Forms.Padding(0, 3, 0, 3)
+                    txt.MinimumSize = New System.Drawing.Size(120, 0)
+
+                    AddHandler txt.Leave, _
+                        Sub(sender As Object, E As EventArgs)
+
+                            If FormState.IsUpdating Then Exit Sub
+
+                            Dim ctrl As System.Windows.Forms.Control = _
+                                CType(sender, System.Windows.Forms.Control)
+
+                            ApplyOneControlValue( _
+                                oDoc, _
+                                ctrl, _
+                                paramControls, _
+                                FormState, _
+                                componentRows, _
+                                txtComponentPNReport)
+
+                        End Sub
+
+                    AddHandler txt.KeyDown, _
+                        Sub(sender As Object, E As System.Windows.Forms.KeyEventArgs)
+
+                            If E.KeyCode = System.Windows.Forms.Keys.Enter Then
+
+                                E.SuppressKeyPress = True
+
+                                If FormState.IsUpdating Then Exit Sub
+
+                                Dim ctrl As System.Windows.Forms.Control = _
+                                    CType(sender, System.Windows.Forms.Control)
+
+                                ApplyOneControlValue( _
+                                    oDoc, _
+                                    ctrl, _
+                                    paramControls, _
+                                    FormState, _
+                                    componentRows, _
+                                    txtComponentPNReport)
+
+                            End If
+
+                        End Sub
+
+                    ParameterTable.Controls.Add(txt, 1, rowIndex)
+                    paramControls.Add(paramName, txt)
+
+                End If
+
+            Catch
+            End Try
+
+        Next
+
+    Finally
+
+        ParameterTable.ResumeLayout(True)
+        ParameterTable.PerformLayout()
+
+    End Try
+
+End Sub
+
+'==================================================
+' BUILD COMPONENT WORKSPACE
+'==================================================
+' DPI-safe version.
+'
+' This replaces the old fixed-coordinate right side.
+'
+' The component workspace now uses a FlowLayoutPanel.
+' The rows stack vertically without needing Row.Top or
+' rowTop += rowGap.
+'==================================================
+
+Sub BuildComponentWorkspace( _
+    ByVal rightFlow As System.Windows.Forms.FlowLayoutPanel, _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByRef txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    If rightFlow Is Nothing Then Exit Sub
+    If componentRows Is Nothing Then Exit Sub
+
+    rightFlow.SuspendLayout()
+
+    Try
+
+        rightFlow.Controls.Clear()
+        componentRows.Clear()
+
+        '--------------------------------------------------
+        ' HEADER
+        '--------------------------------------------------
+
+        Dim lblHeader As New System.Windows.Forms.Label()
+        lblHeader.Text = "Live Component Search / Part Numbers"
+        lblHeader.AutoSize = False
+        lblHeader.Height = 24
+        lblHeader.Width = 100
+		lblHeader.MinimumSize = New System.Drawing.Size(1, 24)
+        lblHeader.Font = New System.Drawing.Font("Segoe UI", 9, System.Drawing.FontStyle.Bold)
+        lblHeader.TextAlign = System.Drawing.ContentAlignment.MiddleLeft
+        lblHeader.Margin = New System.Windows.Forms.Padding(0, 0, 0, 8)
+
+        rightFlow.Controls.Add(lblHeader)
+
+        '--------------------------------------------------
+        ' COMPONENT DEFINITIONS
+        '--------------------------------------------------
+
+        AddComponentRow(componentRows, "DRIVE ASSEMBLY", "DRIVE_ASSEMBLY", "DRIVE_ASSEMBLY", ".iam")
+        AddComponentRow(componentRows, "CROSSMEMBER", "CROSSMEMBER", "CROSSMEMBER", ".ipt")
+        AddComponentRow(componentRows, "DRIVE FRAME", "DRIVE_FRAME", "DRIVE_FRAME", ".iam")
+        AddComponentRow(componentRows, "DRIVE CORE", "DRIVE_CORE", "DRIVE_CORE", ".iam")
+        AddComponentRow(componentRows, "CROSS DRIVE SET", "CROSS_DRIVE_SET", "CROSS_DRIVE_SET", ".iam")
+        AddComponentRow(componentRows, "UPPER CROSS DRIVE SUPPORT", "UPPER_CROSS_DRIVE_SUPPORT", "UPPER_CROSS_DRIVE_SUPPORT", ".ipt")
+        AddComponentRow(componentRows, "SERIAL PLATE", "SERIAL_PLATE", "SERIAL_PLATE", ".ipt")
+        AddComponentRow(componentRows, "CYLINDER MOUNT", "CYLINDER_MOUNT", "CYLINDER_MOUNT", ".ipt")
+        AddComponentRow(componentRows, "CYLINDER MOUNT ASSEMBLY", "CYLINDER_MOUNT_ASSEMBLY", "CYLINDER_MOUNT_ASSEMBLY", ".iam")
+        AddComponentRow(componentRows, "STIFFENER", "STIFFENER", "STIFFENER", ".ipt")
+
+        '--------------------------------------------------
+        ' COMPONENT ROW PANELS
+        '--------------------------------------------------
+
+        For Each Row As ComponentWorkspaceRow In componentRows
+
+            CreateComponentPanel( _
+                rightFlow, _
+                Row)
+
+        Next
+
+        '--------------------------------------------------
+        ' REPORT BOX
+        '--------------------------------------------------
+
+        txtComponentPNReport = New System.Windows.Forms.TextBox()
+		txtComponentPNReport.Width = 100
+		txtComponentPNReport.MinimumSize = New System.Drawing.Size(1, 100)
+        txtComponentPNReport.Height = 225
+        txtComponentPNReport.Multiline = True
+        txtComponentPNReport.ReadOnly = True
+        txtComponentPNReport.WordWrap = False
+        txtComponentPNReport.ScrollBars = System.Windows.Forms.ScrollBars.Both
+        txtComponentPNReport.Font = New System.Drawing.Font("Consolas", 10)
+        txtComponentPNReport.Margin = New System.Windows.Forms.Padding(0, 10, 0, 0)
+
+        rightFlow.Controls.Add(txtComponentPNReport)
+
+    Finally
+
+        rightFlow.ResumeLayout(True)
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' ADD COMPONENT ROW
+'==================================================
+' InputKey is used for user-entered values.
+' PNKey is used for search result values.
+'==================================================
+
+Sub AddComponentRow( _
+    ByVal rows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal title As String, _
+    ByVal inputKey As String, _
+    ByVal pnKey As String, _
+    ByVal fileExtension As String)
+
+    Dim row As New ComponentWorkspaceRow()
+    row.Title = title
+    row.InputKey = inputKey
+    row.PNKey = pnKey
+    row.FileExtension = fileExtension
+
+    rows.Add(row)
+
+End Sub
+
+
+'==================================================
+' CREATE COMPONENT PANEL
+'==================================================
+'Creates one complete component workspace row.
+'
+'Layout:
+'   Row 0 = Bold component title and regular description
+'   Row 1 = Part Number label and TextBox
+'   Row 2 = Save Location label, TextBox, and Browse button
+'   Row 3 = Separator
+'
+'The title and description are both borderless TextBoxes.
+'Using the same control type keeps their text aligned
+'across different Windows DPI and display settings.
+'==================================================
+
+Sub CreateComponentPanel( _
+    ByVal rightFlow As System.Windows.Forms.FlowLayoutPanel, _
+    ByVal Row As ComponentWorkspaceRow)
+
+    If rightFlow Is Nothing Then Exit Sub
+    If Row Is Nothing Then Exit Sub
+
+
+    '==================================================
+    ' COMPONENT ROW PANEL
+    '==================================================
+
+    Row.Panel = New System.Windows.Forms.Panel()
+
+    'Temporary width.
+    'ResizeComponentWorkspaceRows sets the final width.
+    Row.Panel.Width = 100
+
+    'The panel width and height are managed by the rule.
+    Row.Panel.AutoSize = False
+
+    Row.Panel.MinimumSize = _
+        New System.Drawing.Size(1, 1)
+
+    Row.Panel.Margin = _
+        New System.Windows.Forms.Padding(0, 0, 0, 10)
+
+    Row.Panel.Padding = _
+        New System.Windows.Forms.Padding(0)
+
+    Row.Panel.Tag = Row.Title
+
+    rightFlow.Controls.Add(Row.Panel)
+
+
+    '==================================================
+    ' COMPONENT ROW TABLE
+    '==================================================
+
+    Dim rowTable As New System.Windows.Forms.TableLayoutPanel()
+
+    rowTable.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    rowTable.AutoSize = False
+
+    rowTable.ColumnCount = 3
+    rowTable.RowCount = 4
+
+    rowTable.Margin = _
+        New System.Windows.Forms.Padding(0)
+
+    rowTable.Padding = _
+        New System.Windows.Forms.Padding(0)
+
+    rowTable.GrowStyle = _
+        System.Windows.Forms.TableLayoutPanelGrowStyle.FixedSize
+
+
+    '==================================================
+    ' COLUMN STYLES
+    '==================================================
+
+    'Column 0 automatically fits the Part Number and
+    'Save Location labels.
+    rowTable.ColumnStyles.Add( _
+        New System.Windows.Forms.ColumnStyle( _
+            System.Windows.Forms.SizeType.AutoSize))
+
+    'Column 1 receives all remaining available width.
+    rowTable.ColumnStyles.Add( _
+        New System.Windows.Forms.ColumnStyle( _
+            System.Windows.Forms.SizeType.Percent, _
+            100.0!))
+
+    'Column 2 automatically fits the Browse button.
+    rowTable.ColumnStyles.Add( _
+        New System.Windows.Forms.ColumnStyle( _
+            System.Windows.Forms.SizeType.AutoSize))
+
+
+    '==================================================
+    ' ROW STYLES
+    '==================================================
+
+    'Title and description row.
+    rowTable.RowStyles.Add( _
+        New System.Windows.Forms.RowStyle( _
+            System.Windows.Forms.SizeType.AutoSize))
+
+    'Part Number row.
+    rowTable.RowStyles.Add( _
+        New System.Windows.Forms.RowStyle( _
+            System.Windows.Forms.SizeType.AutoSize))
+
+    'Save Location row.
+    rowTable.RowStyles.Add( _
+        New System.Windows.Forms.RowStyle( _
+            System.Windows.Forms.SizeType.AutoSize))
+
+    'Separator row.
+    rowTable.RowStyles.Add( _
+        New System.Windows.Forms.RowStyle( _
+            System.Windows.Forms.SizeType.Absolute, _
+            1.0!))
+
+    Row.Panel.Controls.Add(rowTable)
+
+
+    '==================================================
+    ' TITLE AND DESCRIPTION LAYOUT
+    '==================================================
+    'The nested table keeps the title width separate from
+    'the label column used by Part Number and Save Location.
+    '==================================================
+
+    Dim titleLayout As New System.Windows.Forms.TableLayoutPanel()
+
+    titleLayout.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    titleLayout.AutoSize = True
+
+    titleLayout.AutoSizeMode = _
+        System.Windows.Forms.AutoSizeMode.GrowAndShrink
+
+    titleLayout.ColumnCount = 2
+    titleLayout.RowCount = 1
+
+    titleLayout.Margin = _
+        New System.Windows.Forms.Padding(0, 0, 0, 4)
+
+    titleLayout.Padding = _
+        New System.Windows.Forms.Padding(0)
+
+    titleLayout.GrowStyle = _
+        System.Windows.Forms.TableLayoutPanelGrowStyle.FixedSize
+
+    'Title uses only the width required by its text.
+    titleLayout.ColumnStyles.Add( _
+        New System.Windows.Forms.ColumnStyle( _
+            System.Windows.Forms.SizeType.AutoSize))
+
+    'Description receives all remaining available width.
+    titleLayout.ColumnStyles.Add( _
+        New System.Windows.Forms.ColumnStyle( _
+            System.Windows.Forms.SizeType.Percent, _
+            100.0!))
+
+    titleLayout.RowStyles.Add( _
+        New System.Windows.Forms.RowStyle( _
+            System.Windows.Forms.SizeType.AutoSize))
+
+
+    '==================================================
+    ' COMPONENT TITLE TEXT
+    '==================================================
+
+    Dim txtTitle As New System.Windows.Forms.TextBox()
+
+    txtTitle.Text = Row.Title & ":"
+
+    txtTitle.ReadOnly = True
+
+    txtTitle.BorderStyle = _
+        System.Windows.Forms.BorderStyle.None
+
+    txtTitle.Multiline = False
+    txtTitle.WordWrap = False
+
+    txtTitle.ShortcutsEnabled = False
+    txtTitle.TabStop = False
+
+    txtTitle.Font = _
+        New System.Drawing.Font( _
+            "Segoe UI", _
+            9.0!, _
+            System.Drawing.FontStyle.Bold, _
+            System.Drawing.GraphicsUnit.Point)
+
+    txtTitle.TextAlign = _
+        System.Windows.Forms.HorizontalAlignment.Left
+
+    txtTitle.BackColor = _
+        Row.Panel.BackColor
+
+    txtTitle.ForeColor = _
+        System.Drawing.SystemColors.ControlText
+
+    'Anchor prevents the TextBox from collapsing inside
+    'the automatically sized title column.
+    txtTitle.Anchor = _
+        System.Windows.Forms.AnchorStyles.Left
+
+    'Create space between the title and description.
+    txtTitle.Margin = _
+        New System.Windows.Forms.Padding(0, 0, 12, 0)
+
+    'Measure the title from the current font and DPI.
+    Dim measuredTitleSize As System.Drawing.Size = _
+        System.Windows.Forms.TextRenderer.MeasureText( _
+            txtTitle.Text, _
+            txtTitle.Font)
+
+    txtTitle.MinimumSize = _
+        New System.Drawing.Size( _
+            measuredTitleSize.Width + 2, _
+            txtTitle.PreferredHeight)
+
+
+    '==================================================
+    ' COMPONENT DESCRIPTION TEXT
+    '==================================================
+
+    Row.TxtDescription = _
+        New System.Windows.Forms.TextBox()
+
+    Row.TxtDescription.ReadOnly = True
+
+    Row.TxtDescription.BorderStyle = _
+        System.Windows.Forms.BorderStyle.None
+
+    Row.TxtDescription.Multiline = False
+    Row.TxtDescription.WordWrap = False
+
+    Row.TxtDescription.ShortcutsEnabled = True
+    Row.TxtDescription.TabStop = False
+
+    Row.TxtDescription.Font = _
+        New System.Drawing.Font( _
+            "Segoe UI", _
+            9.0!, _
+            System.Drawing.FontStyle.Regular, _
+            System.Drawing.GraphicsUnit.Point)
+
+    Row.TxtDescription.TextAlign = _
+        System.Windows.Forms.HorizontalAlignment.Left
+
+    Row.TxtDescription.BackColor = _
+        Row.Panel.BackColor
+
+    Row.TxtDescription.ForeColor = _
+        System.Drawing.SystemColors.ControlText
+
+    Row.TxtDescription.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    Row.TxtDescription.Margin = _
+        New System.Windows.Forms.Padding(0)
+
+    Row.TxtDescription.MinimumSize = _
+        New System.Drawing.Size(1, Row.TxtDescription.PreferredHeight)
+
+
+    '==================================================
+    ' ADD TITLE AND DESCRIPTION
+    '==================================================
+
+    titleLayout.Controls.Add( _
+        txtTitle, _
+        0, _
+        0)
+
+    titleLayout.Controls.Add( _
+        Row.TxtDescription, _
+        1, _
+        0)
+
+    rowTable.Controls.Add( _
+        titleLayout, _
+        0, _
+        0)
+
+    'Title and description span the complete component row.
+    rowTable.SetColumnSpan( _
+        titleLayout, _
+        3)
+
+
+    '==================================================
+    ' PART NUMBER LABEL
+    '==================================================
+
+    Dim lblPartNumber As New System.Windows.Forms.Label()
+
+    lblPartNumber.Text = "Part Number:"
+    lblPartNumber.AutoSize = True
+
+    lblPartNumber.Anchor = _
+        System.Windows.Forms.AnchorStyles.Left
+
+    lblPartNumber.TextAlign = _
+        System.Drawing.ContentAlignment.MiddleLeft
+
+    lblPartNumber.AutoEllipsis = False
+    lblPartNumber.UseMnemonic = False
+
+    lblPartNumber.Margin = _
+        New System.Windows.Forms.Padding(0, 7, 12, 7)
+
+    rowTable.Controls.Add( _
+        lblPartNumber, _
+        0, _
+        1)
+
+
+    '==================================================
+    ' PART NUMBER TEXT BOX
+    '==================================================
+
+    Row.TxtPartNumber = _
+        New System.Windows.Forms.TextBox()
+
+    Row.TxtPartNumber.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    Row.TxtPartNumber.Margin = _
+        New System.Windows.Forms.Padding(0, 4, 0, 4)
+
+    Row.TxtPartNumber.MinimumSize = _
+        New System.Drawing.Size(100, 0)
+
+    rowTable.Controls.Add( _
+        Row.TxtPartNumber, _
+        1, _
+        1)
+
+    rowTable.SetColumnSpan( _
+        Row.TxtPartNumber, _
+        2)
+
+
+    '==================================================
+    ' SAVE LOCATION LABEL
+    '==================================================
+
+    Dim lblSave As New System.Windows.Forms.Label()
+
+    lblSave.Text = "Save Location:"
+    lblSave.AutoSize = True
+
+    lblSave.Anchor = _
+        System.Windows.Forms.AnchorStyles.Left
+
+    lblSave.TextAlign = _
+        System.Drawing.ContentAlignment.MiddleLeft
+
+    lblSave.AutoEllipsis = False
+    lblSave.UseMnemonic = False
+
+    lblSave.Margin = _
+        New System.Windows.Forms.Padding(0, 7, 12, 7)
+
+    rowTable.Controls.Add( _
+        lblSave, _
+        0, _
+        2)
+
+
+    '==================================================
+    ' SAVE LOCATION TEXT BOX
+    '==================================================
+
+    Row.TxtSavePath = _
+        New System.Windows.Forms.TextBox()
+
+    Row.TxtSavePath.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    'Multiline is required by WinForms to display
+    'the built-in horizontal scrollbar.
+    Row.TxtSavePath.Multiline = True
+
+    'Keep the path on one visual line.
+    Row.TxtSavePath.WordWrap = False
+
+    'Prevent multiline editing behavior.
+    Row.TxtSavePath.AcceptsReturn = False
+    Row.TxtSavePath.AcceptsTab = False
+
+    Row.TxtSavePath.ScrollBars = _
+        System.Windows.Forms.ScrollBars.Horizontal
+
+    Row.TxtSavePath.TextAlign = _
+        System.Windows.Forms.HorizontalAlignment.Left
+
+    Row.TxtSavePath.Margin = _
+        New System.Windows.Forms.Padding(0, 4, 8, 4)
+
+
+    '==================================================
+    ' AUTOMATIC SAVE LOCATION HEIGHT
+    '==================================================
+    'The required height is calculated from the current
+    'font, DPI, border size, and Windows scrollbar height.
+    '==================================================
+
+    Dim savePathTextHeight As Integer = _
+        System.Windows.Forms.TextRenderer.MeasureText( _
+            "Ag", _
+            Row.TxtSavePath.Font).Height
+
+    Dim savePathScrollHeight As Integer = _
+        System.Windows.Forms.SystemInformation.HorizontalScrollBarHeight
+
+    Dim savePathBorderHeight As Integer = _
+        System.Windows.Forms.SystemInformation.Border3DSize.Height * 2
+
+    Dim savePathMinimumHeight As Integer = _
+        CInt(Math.Ceiling(savePathTextHeight * 1.25)) + _
+        savePathScrollHeight + _
+        savePathBorderHeight
+
+    Row.TxtSavePath.MinimumSize = _
+        New System.Drawing.Size( _
+            100, _
+            savePathMinimumHeight)
+
+
+    '==================================================
+    ' SAVE PATH TOOLTIP
+    '==================================================
+
+    Dim savePathToolTip As _
+        New System.Windows.Forms.ToolTip()
+
+    savePathToolTip.AutoPopDelay = 15000
+    savePathToolTip.InitialDelay = 500
+    savePathToolTip.ReshowDelay = 100
+    savePathToolTip.ShowAlways = True
+
+
+    '==================================================
+    ' UPDATE TOOLTIP WHEN PATH CHANGES
+    '==================================================
+
+    AddHandler Row.TxtSavePath.TextChanged, _
+        Sub(sender As Object, e As EventArgs)
+
+            Try
+
+                Dim pathBox As System.Windows.Forms.TextBox = _
+                    TryCast(sender, System.Windows.Forms.TextBox)
+
+                If pathBox Is Nothing Then Exit Sub
+
+                savePathToolTip.SetToolTip( _
+                    pathBox, _
+                    pathBox.Text)
+
+            Catch
+            End Try
+
+        End Sub
+
+
+    '==================================================
+    ' SHOW BEGINNING OF PATH ON FOCUS
+    '==================================================
+
+    AddHandler Row.TxtSavePath.Enter, _
+        Sub(sender As Object, e As EventArgs)
+
+            Try
+
+                Dim pathBox As System.Windows.Forms.TextBox = _
+                    TryCast(sender, System.Windows.Forms.TextBox)
+
+                If pathBox Is Nothing Then Exit Sub
+                If pathBox.IsDisposed Then Exit Sub
+
+                pathBox.SelectionStart = 0
+                pathBox.SelectionLength = 0
+
+            Catch
+            End Try
+
+        End Sub
+
+
+    '==================================================
+    ' PREVENT ENTER FROM ADDING A NEW LINE
+    '==================================================
+
+    AddHandler Row.TxtSavePath.KeyDown, _
+        Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
+
+            If e.KeyCode = _
+                System.Windows.Forms.Keys.Enter Then
+
+                e.SuppressKeyPress = True
+                e.Handled = True
+
+            End If
+
+        End Sub
+
+    rowTable.Controls.Add( _
+        Row.TxtSavePath, _
+        1, _
+        2)
+
+
+    '==================================================
+    ' BROWSE BUTTON
+    '==================================================
+
+    Row.BtnBrowse = _
+        New System.Windows.Forms.Button()
+
+    Row.BtnBrowse.Text = "..."
+
+    Row.BtnBrowse.AutoSize = True
+
+    Row.BtnBrowse.AutoSizeMode = _
+        System.Windows.Forms.AutoSizeMode.GrowAndShrink
+
+    Row.BtnBrowse.MinimumSize = _
+        New System.Drawing.Size(32, 0)
+
+    Row.BtnBrowse.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    Row.BtnBrowse.Margin = _
+        New System.Windows.Forms.Padding(0, 4, 0, 4)
+
+    rowTable.Controls.Add( _
+        Row.BtnBrowse, _
+        2, _
+        2)
+
+
+    '==================================================
+    ' ROW SEPARATOR
+    '==================================================
+
+    Dim sep As New System.Windows.Forms.Panel()
+
+    sep.BackColor = _
+        System.Drawing.Color.Black
+
+    sep.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    sep.Margin = _
+        New System.Windows.Forms.Padding(0)
+
+    rowTable.Controls.Add( _
+        sep, _
+        0, _
+        3)
+
+    rowTable.SetColumnSpan( _
+        sep, _
+        3)
+
+
+    '==================================================
+    ' CALCULATE COMPONENT PANEL HEIGHT
+    '==================================================
+    'The outer panel cannot use AutoSize because its width
+    'is controlled by ResizeComponentWorkspaceRows.
+    '
+    'Temporarily enable AutoSize on the inner table,
+    'calculate the preferred height, then return it to Fill.
+    '==================================================
+
+    rowTable.AutoSize = True
+
+    rowTable.AutoSizeMode = _
+        System.Windows.Forms.AutoSizeMode.GrowAndShrink
+
+    rowTable.PerformLayout()
+
+    Dim preferredTableSize As System.Drawing.Size = _
+        rowTable.GetPreferredSize( _
+            New System.Drawing.Size( _
+                Math.Max(Row.Panel.Width, 300), _
+                0))
+
+    Row.Panel.Height = _
+        Math.Max(1, preferredTableSize.Height)
+
+    'Return the table to Fill after calculating height.
+    rowTable.AutoSize = False
+
+    rowTable.Dock = _
+        System.Windows.Forms.DockStyle.Fill
+
+    Row.Panel.PerformLayout()
+
+End Sub
+
+
+
+'==================================================
+' RESIZE COMPONENT WORKSPACE ROWS
+'==================================================
+
+Sub ResizeComponentWorkspaceRows( _
+    ByVal rightFlow As System.Windows.Forms.FlowLayoutPanel, _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    If rightFlow Is Nothing Then Exit Sub
+
+    Try
+
+        Dim scrollBarWidth As Integer = 0
+
+        If rightFlow.VerticalScroll.Visible Then
+
+            scrollBarWidth = _
+                System.Windows.Forms.SystemInformation.VerticalScrollBarWidth
+
+        End If
+
+        Dim usableWidth As Integer = _
+            rightFlow.ClientSize.Width - _
+            rightFlow.Padding.Left - _
+            rightFlow.Padding.Right - _
+            scrollBarWidth - _
+            4
+
+        If usableWidth < 1 Then
+            usableWidth = 1
+        End If
+
+        For Each ctrl As System.Windows.Forms.Control In rightFlow.Controls
+
+            If TypeOf ctrl Is System.Windows.Forms.Label Then
+
+                If ctrl.Text = _
+                    "Live Component Search / Part Numbers" Then
+
+                    ctrl.Width = usableWidth
+
+                End If
+
+            End If
+
+        Next
+
+        If Not componentRows Is Nothing Then
+
+            For Each Row As ComponentWorkspaceRow In componentRows
+
+                If Row Is Nothing Then Continue For
+                If Row.Panel Is Nothing Then Continue For
+
+                Row.Panel.Width = usableWidth
+
+            Next
+
+        End If
+
+        If Not txtComponentPNReport Is Nothing Then
+            txtComponentPNReport.Width = usableWidth
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+'==================================================
+' BROWSE BUTTON HANDLERS
+'==================================================
+' Browse only works when the Part Number box is editable.
+' If a found PN exists, Part Number and Save Location stay locked.
+'==================================================
+
+Sub AddBrowseHandlers( _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow))
+
+    If componentRows Is Nothing Then Exit Sub
+
+    For Each currentRow As ComponentWorkspaceRow In componentRows
+
+        If currentRow Is Nothing Then Continue For
+        If currentRow.BtnBrowse Is Nothing Then Continue For
+
+        Dim thisRow As ComponentWorkspaceRow = currentRow
+
+		AddHandler thisRow.BtnBrowse.Click, _
+		    Sub(sender As Object, E As EventArgs)
+		
+		        If thisRow.TxtPartNumber Is Nothing Then Exit Sub
+		        If thisRow.TxtSavePath Is Nothing Then Exit Sub
+		
+		        If thisRow.TxtPartNumber.ReadOnly Then Exit Sub
+		
+		        Dim selectedPath As String = _
+		            PromptForSavePathFromForm( _
+		                thisRow.Title, _
+		                thisRow.TxtPartNumber.Text, _
+		                thisRow.FileExtension)
+		
+		        selectedPath = Trim(selectedPath)
+		
+		        'Do not erase the current path if the user cancels.
+		        If selectedPath = "" Then Exit Sub
+		
+		        thisRow.TxtSavePath.Text = selectedPath
+		
+		        'Immediately preserve both values so another workspace
+		        'refresh cannot replace the selected path with a blank value.
+		        Try
+		
+		            SharedVariable( _
+		                "DriveConfig_InputPN_" & thisRow.InputKey) = _
+		                Trim(thisRow.TxtPartNumber.Text)
+		
+		            SharedVariable( _
+		                "DriveConfig_InputPath_" & thisRow.InputKey) = _
+		                selectedPath
+		
+		        Catch
+		        End Try
+		
+		        'Display the beginning of the path.
+		        Try
+		
+		            thisRow.TxtSavePath.SelectionStart = 0
+		            thisRow.TxtSavePath.SelectionLength = 0
+		            thisRow.TxtSavePath.ScrollToCaret()
+		
+		        Catch
+		        End Try
+		
+		    End Sub
+
+    Next
+
+End Sub
+
+
+
+'==================================================
+' APPLY ONE CONTROL VALUE
+'==================================================
+' Updates a parameter.
+' Runs dynamic rules.
+' Updates document.
+' Refreshes form.
+' Refreshes live search workspace.
+'==================================================
+
+Sub ApplyOneControlValue( _
+    ByVal oDoc As Document, _
+    ByVal ctrl As System.Windows.Forms.Control, _
+    ByVal paramControls As System.Collections.Generic.Dictionary(Of String, System.Windows.Forms.Control), _
+    ByVal FormState As FormState, _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    Try
+
+        If ctrl Is Nothing Then Exit Sub
+        If ctrl.Tag Is Nothing Then Exit Sub
+
+        Dim paramName As String = CStr(ctrl.Tag)
+        Dim expressionValue As String = GetControlValue(ctrl)
+
+        If Trim(expressionValue) = "" Then Exit Sub
+
+		SetParameterValue(oDoc, paramName, expressionValue)
+		
+		EnforceDynamicRules(oDoc, paramName)
+		
+
+		
+		'==================================================
+		' RUN PARAMETER FORMATTING RULE
+		' BEFORE LIVE SEARCH
+		'==================================================
+		iLogicVb.RunExternalRule("All Components\Sets Parameters and iProperties Units and Precision")
+
+		
+		UpdateDocument(oDoc)
+		
+		RefreshFormValues(oDoc, paramControls, FormState)
+		
+		InitializeConfiguratorData( _
+		    oDoc, _
+		    componentRows, _
+		    txtComponentPNReport)
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Failed to update parameter." & vbCrLf & vbCrLf & _
+            ex.Message, _
+            "Drive Configurator")
+
+    End Try
+
+End Sub
+
+
+
+
+
+'==================================================
+' RUN LIVE SEARCH AND UPDATE WORKSPACE
+'==================================================
+' Saves current New PN / Save Location inputs.
+' Sets DriveConfig_LiveSearchOnly = True.
+' Runs the Search / Replace rule in live-search mode.
+' Reads the found part numbers back from SharedVariables.
+'==================================================
+
+Sub RunLiveSearchAndUpdateWorkspace( _
+    ByVal oDoc As Document, _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    If componentRows Is Nothing Then Exit Sub
+    If txtComponentPNReport Is Nothing Then Exit Sub
+
+
+    Try
+
+        SaveComponentPNInputsToSharedVariables(componentRows)
+
+        If Not oDoc Is Nothing Then
+            UpdateDocument(oDoc)
+        End If
+
+        Try
+            SharedVariable("DriveConfig_LiveSearchOnly") = True
+        Catch
+        End Try
+
+        '--------------------------------------------------
+        ' Exact external rule name.
+        ' No _Copy names.
+        '--------------------------------------------------
+
+        RunSearchRuleSafe()
+
+        If Not oDoc Is Nothing Then
+            UpdateDocument(oDoc)
+        End If
+
+    Catch ex As Exception
+
+        txtComponentPNReport.Text = _
+            "Live search failed:" & vbCrLf & vbCrLf & _
+            ex.Message
+
+    Finally
+
+        Try
+            SharedVariable("DriveConfig_LiveSearchOnly") = False
+        Catch
+        End Try
+
+    End Try
+
+    UpdateComponentPartNumberWorkspaceFromShared( _
+        componentRows, _
+        txtComponentPNReport)
+
+End Sub
+
+
+'==================================================
+' SAVE COMPONENT PART NUMBER INPUTS TO SHARED VARIABLES
+'==================================================
+' If Found PN is blank:
+'   Save New PN and Save Location.
+'
+' If Found PN has a value:
+'   Clear the New PN and Save Location shared variables.
+'==================================================
+
+Sub SaveComponentPNInputsToSharedVariables( _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow))
+
+    If componentRows Is Nothing Then Exit Sub
+
+    For Each Row As ComponentWorkspaceRow In componentRows
+
+        If Not Row Is Nothing Then
+            SaveOneComponentInput(Row)
+        End If
+
+    Next
+
+End Sub
+
+
+'==================================================
+' SAVE ONE COMPONENT INPUT
+'==================================================
+' If Part Number box is editable:
+'   Save typed Part Number and Save Location.
+'
+' If Part Number box is locked:
+'   Clear input shared variables because the part already exists.
+'==================================================
+
+Sub SaveOneComponentInput(ByVal Row As ComponentWorkspaceRow)
+
+    Try
+
+        If Row Is Nothing Then Exit Sub
+        If Row.TxtPartNumber Is Nothing Then Exit Sub
+        If Row.TxtSavePath Is Nothing Then Exit Sub
+
+        If Row.TxtPartNumber.ReadOnly = False Then
+
+            SharedVariable("DriveConfig_InputPN_" & Row.InputKey) = Trim(Row.TxtPartNumber.Text)
+            SharedVariable("DriveConfig_InputPath_" & Row.InputKey) = Trim(Row.TxtSavePath.Text)
+
+        Else
+
+            SharedVariable("DriveConfig_InputPN_" & Row.InputKey) = ""
+            SharedVariable("DriveConfig_InputPath_" & Row.InputKey) = ""
+
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+'==================================================
+' UPDATE COMPONENT WORKSPACE FROM SHARED VARIABLES
+'==================================================
+' Reads found part numbers from the search rule.
+' If found PN exists:
+'   Shows found PN in Part Number box and locks it.
+'
+' If found PN is blank:
+'   Keeps/restores typed input PN and allows editing.
+'==================================================
+
+Sub UpdateComponentPartNumberWorkspaceFromShared( _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    If componentRows Is Nothing Then Exit Sub
+    If txtComponentPNReport Is Nothing Then Exit Sub
+
+For Each Row As ComponentWorkspaceRow In componentRows
+
+    If Not Row Is Nothing Then
+
+        MarkInputNeeded(Row)
+	
+	        '==================================================
+	        ' REFRESH DESCRIPTION FROM SHARED VARIABLE
+	        '==================================================
+	        ' Search rule stores existing Vault descriptions here:
+	        '   DriveConfig_DESC_DRIVE_CORE
+	        '   DriveConfig_DESC_CROSSMEMBER
+	        '   etc.
+	        '
+	        ' Description preview rule stores generated descriptions here too.
+	        '==================================================
+	
+			If Not Row.TxtDescription Is Nothing Then
+			
+			    Row.TxtDescription.Text = _
+			        GetSharedText( _
+			            "DriveConfig_DESC_" & Row.PNKey)
+			
+			    'Keep the beginning of the description visible.
+			    Try
+			        Row.TxtDescription.SelectionStart = 0
+			        Row.TxtDescription.SelectionLength = 0
+			    Catch
+			    End Try
+			
+			End If
+	
+	    End If
+
+	Next
+	
+	txtComponentPNReport.Text = BuildPartNumberReport(componentRows)
+	
+	ReorderComponentPanels(componentRows, txtComponentPNReport)
+
+End Sub
+
+
+'==================================================
+' MARK INPUT NEEDED
+'==================================================
+' If found PN exists:
+'   Part Number box shows found PN, turns gray, and locks.
+'
+' If found PN is blank:
+'   Part Number box stays editable and yellow.
+'   Previously typed PN is kept from SharedVariables.
+'
+' If found value is NOT PLACED:
+'   Row gets hidden by ReorderComponentPanels.
+'==================================================
+
+Sub MarkInputNeeded(ByVal Row As ComponentWorkspaceRow)
+
+    If Row Is Nothing Then Exit Sub
+    If Row.TxtPartNumber Is Nothing Then Exit Sub
+    If Row.TxtSavePath Is Nothing Then Exit Sub
+
+    Dim foundValue As String = GetSharedText("DriveConfig_PN_" & Row.PNKey)
+    Dim inputPartNumber As String = GetSharedText("DriveConfig_InputPN_" & Row.InputKey)
+    Dim inputSavePath As String = GetSharedText("DriveConfig_InputPath_" & Row.InputKey)
+
+    foundValue = Trim(foundValue)
+    inputPartNumber = Trim(inputPartNumber)
+    inputSavePath = Trim(inputSavePath)
+
+	If foundValue = "" Then
+	
+	    Row.TxtPartNumber.ReadOnly = False
+	    Row.TxtSavePath.ReadOnly = False
+	
+	    Row.TxtPartNumber.BackColor = System.Drawing.Color.LightYellow
+	    Row.TxtSavePath.BackColor = System.Drawing.Color.LightYellow
+	
+	    'Always restore user-entered values.
+	    'Do NOT leave an old Vault PN on screen.
+	
+	    Row.TxtPartNumber.Text = inputPartNumber
+	    Row.TxtSavePath.Text = inputSavePath
+
+    Else
+
+        Row.TxtPartNumber.Text = foundValue
+        Row.TxtSavePath.Text = ""
+
+        Row.TxtPartNumber.ReadOnly = True
+        Row.TxtSavePath.ReadOnly = True
+
+        Row.TxtPartNumber.BackColor = System.Drawing.Color.LightGray
+        Row.TxtSavePath.BackColor = System.Drawing.Color.LightGray
+
+    End If
+
+End Sub
+
+
+'==================================================
+' BUILD PART NUMBER REPORT
+'==================================================
+' Report shows component name and whatever is currently
+' displayed in the single Part Number box.
+'==================================================
+
+Function BuildPartNumberReport( _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow)) As String
+
+    Dim report As String = ""
+
+    If componentRows Is Nothing Then Return report
+
+    For Each Row As ComponentWorkspaceRow In componentRows
+
+        If Not Row Is Nothing Then
+
+            report &= Row.Title & vbCrLf
+
+            If Row.TxtPartNumber Is Nothing Then
+                report &= "Part Number: " & vbCrLf & vbCrLf
+            Else
+                report &= "Part Number: " & Trim(Row.TxtPartNumber.Text) & vbCrLf & vbCrLf
+            End If
+
+        End If
+
+    Next
+
+    Return report
+
+End Function
+
+
+'==================================================
+' REORDER COMPONENT PANELS
+'==================================================
+' DPI-safe version.
+'
+' FlowLayoutPanel controls the vertical layout.
+' This routine only changes control order.
+'
+' Rows needing a new PN move to the top.
+' Rows with an existing PN move below.
+' Rows marked NOT PLACED are hidden.
+'==================================================
+
+Sub ReorderComponentPanels( _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    If componentRows Is Nothing Then Exit Sub
+    If txtComponentPNReport Is Nothing Then Exit Sub
+
+    Dim rightFlow As System.Windows.Forms.FlowLayoutPanel = Nothing
+
+    Try
+
+        For Each Row As ComponentWorkspaceRow In componentRows
+
+            If Row Is Nothing Then Continue For
+            If Row.Panel Is Nothing Then Continue For
+
+            rightFlow = TryCast(Row.Panel.Parent, System.Windows.Forms.FlowLayoutPanel)
+
+            If Not rightFlow Is Nothing Then Exit For
+
+        Next
+
+    Catch
+    End Try
+
+    If rightFlow Is Nothing Then Exit Sub
+
+    rightFlow.SuspendLayout()
+
+    Try
+
+        Dim missingRows As New System.Collections.Generic.List(Of ComponentWorkspaceRow)
+        Dim foundRows As New System.Collections.Generic.List(Of ComponentWorkspaceRow)
+        Dim hiddenRows As New System.Collections.Generic.List(Of ComponentWorkspaceRow)
+
+        For Each Row As ComponentWorkspaceRow In componentRows
+
+            If Row Is Nothing Then Continue For
+            If Row.Panel Is Nothing Then Continue For
+            If Row.TxtPartNumber Is Nothing Then Continue For
+
+            Dim foundValue As String = _
+                Trim(GetSharedText("DriveConfig_PN_" & Row.PNKey))
+
+            If UCase(foundValue) = "NOT PLACED" Then
+
+                Row.Panel.Visible = False
+                hiddenRows.Add(Row)
+
+            ElseIf foundValue = "" Then
+
+                Row.Panel.Visible = True
+                missingRows.Add(Row)
+
+            Else
+
+                Row.Panel.Visible = True
+                                foundRows.Add(Row)
+
+            End If
+
+        Next
+
+        '--------------------------------------------------
+        ' Index 0 is the header label.
+        ' Component rows start at index 1.
+        '--------------------------------------------------
+
+        Dim displayIndex As Integer = 1
+
+        For Each Row As ComponentWorkspaceRow In missingRows
+
+            Try
+
+                rightFlow.Controls.SetChildIndex(Row.Panel, displayIndex)
+                displayIndex += 1
+
+            Catch
+            End Try
+
+        Next
+
+        For Each Row As ComponentWorkspaceRow In foundRows
+
+            Try
+
+                rightFlow.Controls.SetChildIndex(Row.Panel, displayIndex)
+                displayIndex += 1
+
+            Catch
+            End Try
+
+        Next
+
+        For Each Row As ComponentWorkspaceRow In hiddenRows
+
+            Try
+
+                rightFlow.Controls.SetChildIndex(Row.Panel, displayIndex)
+                displayIndex += 1
+
+            Catch
+            End Try
+
+        Next
+
+        Try
+
+            txtComponentPNReport.Visible = True
+            rightFlow.Controls.SetChildIndex(txtComponentPNReport, displayIndex)
+
+        Catch
+        End Try
+
+        ResizeComponentWorkspaceRows( _
+            rightFlow, _
+            componentRows, _
+            txtComponentPNReport)
+
+    Finally
+
+        rightFlow.ResumeLayout(True)
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' PROMPT FOR SAVE PATH FROM FORM
+'==================================================
+
+Function PromptForSavePathFromForm( _
+    ByVal targetLabel As String, _
+    ByVal partNumber As String, _
+    ByVal ext As String) As String
+
+    Dim dlg As Inventor.FileDialog = Nothing
+
+    Try
+
+        ThisApplication.CreateFileDialog(dlg)
+
+        Dim cleanPN As String = Trim(partNumber)
+
+        If cleanPN = "" Then
+            cleanPN = targetLabel
+        End If
+
+        cleanPN = Replace(cleanPN, ":", "")
+        cleanPN = Replace(cleanPN, "/", "-")
+        cleanPN = Replace(cleanPN, "\", "-")
+
+        dlg.DialogTitle = "Save New File For " & targetLabel
+        dlg.FileName = cleanPN & ext
+        dlg.CancelError = True
+
+        If LCase(ext) = ".ipt" Then
+            dlg.Filter = "Inventor Part Files (*.ipt)|*.ipt"
+        ElseIf LCase(ext) = ".iam" Then
+            dlg.Filter = "Inventor Assembly Files (*.iam)|*.iam"
+        Else
+            dlg.Filter = "Inventor Files (*" & ext & ")|*" & ext
+        End If
+
+        Try
+            dlg.ShowSave()
+            Return dlg.FileName
+        Catch
+            Return ""
+        End Try
+
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'==================================================
+' GET SHARED TEXT
+'==================================================
+
+Function GetSharedText(ByVal sharedName As String) As String
+
+    Try
+
+        If SharedVariable.Exists(sharedName) Then
+            Return CStr(SharedVariable(sharedName))
+        End If
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+'==================================================
+' RUN EXTERNAL RULE SAFE
+'==================================================
+
+Sub RunExternalRuleSafe( _
+    ByVal fullRuleName As String, _
+    ByVal plainRuleName As String, _
+    ByVal displayName As String)
+
+    Try
+
+        Try
+            iLogicVb.RunExternalRule(fullRuleName)
+            Exit Sub
+        Catch
+        End Try
+
+        Try
+            iLogicVb.RunExternalRule(plainRuleName)
+            Exit Sub
+        Catch exPlain As Exception
+
+            MessageBox.Show( _
+                "Failed to run rule:" & vbCrLf & vbCrLf & _
+                displayName & vbCrLf & vbCrLf & _
+                "Tried:" & vbCrLf & _
+                fullRuleName & vbCrLf & _
+                plainRuleName & vbCrLf & vbCrLf & _
+                "Error:" & vbCrLf & _
+                exPlain.Message, _
+                "Drive Configurator")
+
+        End Try
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Failed to run rule:" & vbCrLf & vbCrLf & _
+            displayName & vbCrLf & vbCrLf & _
+            ex.Message, _
+            "Drive Configurator")
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' REFRESH FORM VALUES
+'==================================================
+' Updates the form controls from the actual document values.
+'
+' formState.IsUpdating prevents ComboBox and TextBox
+' handlers from firing while the form is being refreshed.
+'==================================================
+
+Sub RefreshFormValues( _
+    ByVal oDoc As Document, _
+    ByVal paramControls As System.Collections.Generic.Dictionary(Of String, System.Windows.Forms.Control), _
+    ByVal FormState As FormState)
+
+    FormState.IsUpdating = True
+
+    Try
+
+        For Each kvp As System.Collections.Generic.KeyValuePair(Of String, System.Windows.Forms.Control) In paramControls
+
+            Dim paramName As String = kvp.Key
+            Dim ctrl As System.Windows.Forms.Control = kvp.Value
+
+            Dim displayValue As String = GetParameterDisplayValue(oDoc, paramName)
+
+            If TypeOf ctrl Is System.Windows.Forms.ComboBox Then
+
+                Dim cbo As System.Windows.Forms.ComboBox = _
+                    CType(ctrl, System.Windows.Forms.ComboBox)
+
+                SetComboBoxSelectedValue(cbo, displayValue)
+
+            ElseIf TypeOf ctrl Is System.Windows.Forms.TextBox Then
+
+                Dim txt As System.Windows.Forms.TextBox = _
+                    CType(ctrl, System.Windows.Forms.TextBox)
+
+                txt.Text = displayValue
+
+            End If
+
+        Next
+
+    Finally
+
+        FormState.IsUpdating = False
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' SET COMBOBOX SELECTED VALUE
+'==================================================
+
+Sub SetComboBoxSelectedValue( _
+    ByVal cbo As System.Windows.Forms.ComboBox, _
+    ByVal displayValue As String)
+
+    Try
+
+        If cbo.Items.Contains(displayValue) Then
+            cbo.SelectedItem = displayValue
+            Exit Sub
+        End If
+
+        Dim targetNumber As Double = 0
+
+        If TryGetNumber(displayValue, targetNumber) Then
+
+            For Each item As Object In cbo.Items
+
+                Dim itemNumber As Double = 0
+
+                If TryGetNumber(CStr(item), itemNumber) Then
+
+                    If Math.Abs(itemNumber - targetNumber) < 0.0001 Then
+                        cbo.SelectedItem = item
+                        Exit Sub
+                    End If
+
+                End If
+
+            Next
+
+        End If
+
+        cbo.SelectedIndex = -1
+
+    Catch
+
+        cbo.SelectedIndex = -1
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' DYNAMIC CONFIGURATION RULES
+'==================================================
+' The changed parameter wins first.
+' This keeps System, Shoe_Style, Bore_Size, CC,
+' Stroke_Length, and Drive_Frame_Gap from fighting.
+'==================================================
+
+Sub EnforceDynamicRules( _
+    ByVal oDoc As Document, _
+    Optional ByVal changedParamName As String = "")
+
+    Try
+
+        Dim changedName As String = Trim(UCase(changedParamName))
+
+        Dim systemValue As String = _
+            Trim(UCase(GetParameterDisplayValue(oDoc, "System")))
+
+        Dim boreValue As Double = _
+            GetParameterNumericValue(oDoc, "Bore_Size")
+
+        Dim ccValue As Double = _
+            GetParameterNumericValue(oDoc, "CC")
+
+        Dim strokeValue As Double = _
+            GetParameterNumericValue(oDoc, "Stroke_Length")
+
+        Dim gapValue As Double = _
+            GetParameterNumericValue(oDoc, "Drive_Frame_Gap")
+
+        Dim shoeStyle As String = _
+            Trim(UCase(GetParameterDisplayValue(oDoc, "Shoe_Style")))
+
+        Dim crossmemberMaterial As String = _
+            Trim(UCase(GetParameterDisplayValue(oDoc, "Crossmember_Material")))
+
+
+
+
+        '==================================================
+        ' USER CHANGED SHOE STYLE
+        '==================================================
+
+        If changedName = "SHOE_STYLE" Then
+
+            ApplyPackageFromShoe(oDoc, systemValue, shoeStyle)
+
+            Exit Sub
+
+        End If
+
+
+        '==================================================
+        ' USER CHANGED BORE SIZE
+        '==================================================
+
+        If changedName = "BORE_SIZE" Then
+
+            If Math.Abs(boreValue - 3.0) < 0.0001 Then
+
+                If shoeStyle = "LONG SHOE 8 HOLE (LS8H)" Then
+                    SetParameterValue(oDoc, "Shoe_Style", "Long Shoe 6 Hole (LS6H)")
+                End If
+
+            ElseIf Math.Abs(boreValue - 3.5) < 0.0001 Then
+
+                If shoeStyle = "LONG SHOE 6 HOLE (LS6H)" Or _
+                   shoeStyle = "SHORT SHOE 6 HOLE (SHS6H)" Then
+
+                    SetParameterValue(oDoc, "Shoe_Style", "Long Shoe 8 Hole (LS8H)")
+
+                End If
+
+            End If
+
+            If systemValue = "RX2" Then
+                ApplyRX2Package(oDoc)
+            End If
+
+            Exit Sub
+
+        End If
+
+
+        '==================================================
+        ' USER CHANGED SYSTEM
+        '==================================================
+
+        If changedName = "SYSTEM" Then
+
+            If systemValue = "RX2" Then
+                ApplyRX2Package(oDoc)
+            End If
+
+            Exit Sub
+
+        End If
+
+
+        '==================================================
+        ' RX2 LOCK
+        '==================================================
+
+        If systemValue = "RX2" Then
+            ApplyRX2Package(oDoc)
+            Exit Sub
+        End If
+
+
+        '==================================================
+        ' GENERAL BORE VALIDATION
+        '==================================================
+
+        If Math.Abs(boreValue - 3.0) < 0.0001 Then
+
+            If shoeStyle = "LONG SHOE 8 HOLE (LS8H)" Then
+                SetParameterValue(oDoc, "Shoe_Style", "Long Shoe 6 Hole (LS6H)")
+                shoeStyle = "LONG SHOE 6 HOLE (LS6H)"
+            End If
+
+        ElseIf Math.Abs(boreValue - 3.5) < 0.0001 Then
+
+            If shoeStyle = "LONG SHOE 6 HOLE (LS6H)" Or _
+               shoeStyle = "SHORT SHOE 6 HOLE (SHS6H)" Then
+
+                SetParameterValue(oDoc, "Shoe_Style", "Long Shoe 8 Hole (LS8H)")
+                shoeStyle = "LONG SHOE 8 HOLE (LS8H)"
+
+            End If
+
+        End If
+
+
+        '==================================================
+        ' USER CHANGED CC
+        '==================================================
+
+        If changedName = "CC" Then
+
+            If Math.Abs(ccValue - 10.0) < 0.0001 Then
+
+                ApplyWideShoePackage(oDoc)
+
+            ElseIf Math.Abs(ccValue - 5.0) < 0.0001 Then
+
+                ApplyStandardShoePackage(oDoc)
+
+                If shoeStyle = "WIDE SHOE 16 HOLE (WS16H)" Then
+                    SetParameterValue(oDoc, "Shoe_Style", GetDefaultNonWideShoe(boreValue))
+                End If
+
+            End If
+
+            Exit Sub
+
+        End If
+
+
+        '==================================================
+        ' USER CHANGED STROKE LENGTH
+        '==================================================
+
+        If changedName = "STROKE_LENGTH" Then
+
+            If Math.Abs(strokeValue - 6.0) < 0.0001 Then
+
+                ApplyWideShoePackage(oDoc)
+
+            ElseIf Math.Abs(strokeValue - 8.0) < 0.0001 Then
+
+                ApplyStandardShoePackage(oDoc)
+
+                If shoeStyle = "WIDE SHOE 16 HOLE (WS16H)" Then
+                    SetParameterValue(oDoc, "Shoe_Style", GetDefaultNonWideShoe(boreValue))
+                End If
+
+            End If
+
+            Exit Sub
+
+        End If
+
+
+        '==================================================
+        ' USER CHANGED DRIVE FRAME GAP
+        '==================================================
+
+        If changedName = "DRIVE_FRAME_GAP" Then
+
+            If Math.Abs(gapValue - 55.0) < 0.0001 Then
+
+                ApplyWideShoePackage(oDoc)
+
+            ElseIf Math.Abs(gapValue - 57.0) < 0.0001 Then
+
+                ApplyStandardShoePackage(oDoc)
+                SetParameterValue(oDoc, "Shoe_Style", GetDefaultNonWideShoe(boreValue))
+
+            End If
+
+            Exit Sub
+
+        End If
+
+
+
+
+        '==================================================
+        ' FALLBACK RULES
+        '==================================================
+        ' These run when no specific changed parameter rule handled it.
+        ' This keeps the configuration in a valid default state.
+        '==================================================
+
+        If shoeStyle = "WIDE SHOE 16 HOLE (WS16H)" Then
+
+            ApplyWideShoePackage(oDoc)
+
+        Else
+
+            ApplyStandardShoePackage(oDoc)
+
+            SetParameterValue(oDoc, "Shoe_Style", _
+                GetDefaultAllowedShoe(oDoc, boreValue, shoeStyle))
+
+        End If
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            "Dynamic rule failed." & vbCrLf & vbCrLf & _
+            ex.Message, _
+            "Drive Configurator")
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' APPLY PACKAGE FROM SHOE
+'==================================================
+' Handles what should happen when Shoe_Style is changed.
+' Shoe_Style can force Bore_Size and the standard package.
+'==================================================
+
+Sub ApplyPackageFromShoe( _
+    ByVal oDoc As Document, _
+    ByVal systemValue As String, _
+    ByVal shoeStyle As String)
+
+    If shoeStyle = "WIDE SHOE 16 HOLE (WS16H)" Then
+
+        If systemValue = "RX2" Then
+            ApplyRX2Package(oDoc)
+        Else
+            ApplyWideShoePackage(oDoc)
+        End If
+
+    ElseIf shoeStyle = "LONG SHOE 8 HOLE (LS8H)" Then
+
+        SetParameterValue(oDoc, "Bore_Size", "3.5 in")
+
+        If systemValue = "RX2" Then
+            ApplyRX2Package(oDoc)
+        Else
+            ApplyStandardShoePackage(oDoc)
+        End If
+
+    ElseIf shoeStyle = "LONG SHOE 6 HOLE (LS6H)" Or _
+           shoeStyle = "SHORT SHOE 6 HOLE (SHS6H)" Then
+
+        SetParameterValue(oDoc, "Bore_Size", "3.0 in")
+
+        If systemValue = "RX2" Then
+            ApplyRX2Package(oDoc)
+        Else
+            ApplyStandardShoePackage(oDoc)
+        End If
+
+    Else
+
+        If systemValue = "RX2" Then
+            ApplyRX2Package(oDoc)
+        Else
+            ApplyStandardShoePackage(oDoc)
+        End If
+
+    End If
+
+End Sub
+
+
+'==================================================
+' STANDARD SHOE PACKAGE
+'==================================================
+' Standard package:
+'   CC = 5.0 in
+'   Stroke_Length = 8.0 in
+'   Drive_Frame_Gap = 57.0 in
+'==================================================
+
+Sub ApplyStandardShoePackage(ByVal oDoc As Document)
+
+    SetParameterValue(oDoc, "CC", "5.0 in")
+    SetParameterValue(oDoc, "Stroke_Length", "8.0 in")
+    SetParameterValue(oDoc, "Drive_Frame_Gap", "57.0 in")
+
+End Sub
+
+
+'==================================================
+' WIDE SHOE PACKAGE
+'==================================================
+' Wide shoe package:
+'   CC = 10.0 in
+'   Stroke_Length = 6.0 in
+'   Drive_Frame_Gap = 55.0 in
+'   Shoe_Style = Wide Shoe 16 Hole
+'==================================================
+
+Sub ApplyWideShoePackage(ByVal oDoc As Document)
+
+    SetParameterValue(oDoc, "CC", "10.0 in")
+    SetParameterValue(oDoc, "Stroke_Length", "6.0 in")
+    SetParameterValue(oDoc, "Drive_Frame_Gap", "55.0 in")
+    SetParameterValue(oDoc, "Shoe_Style", "Wide Shoe 16 Hole (WS16H)")
+
+End Sub
+
+
+'==================================================
+' RX2 PACKAGE
+'==================================================
+' RX2 package:
+'   CC = 10.0 in
+'   Stroke_Length = 8.0 in
+'   Drive_Frame_Gap = 57.0 in
+'
+' This does NOT force Shoe_Style.
+'==================================================
+
+Sub ApplyRX2Package(ByVal oDoc As Document)
+
+    SetParameterValue(oDoc, "CC", "10.0 in")
+    SetParameterValue(oDoc, "Stroke_Length", "8.0 in")
+    SetParameterValue(oDoc, "Drive_Frame_Gap", "57.0 in")
+
+End Sub
+
+
+'==================================================
+' PARAMETER OPTIONS
+'==================================================
+' These are the combo box options.
+' Anything not listed here becomes a text box.
+'==================================================
+
+Function GetOptionsForParameter(ByVal paramName As String) As System.Collections.Generic.List(Of String)
+
+    Dim values As New System.Collections.Generic.List(Of String)
+
+    Select Case paramName
+
+        Case "System"
+            values.Add("RX3")
+            values.Add("RX2")
+            values.Add("RX")
+
+        Case "Controls"
+            values.Add("Electric")
+            values.Add("Manual")
+
+        Case "Valve_Mount_Style"
+            values.Add("End Mount")
+            values.Add("Mid Mount")
+
+        Case "Bore_Size"
+            values.Add("3.0 in")
+            values.Add("3.5 in")
+            values.Add("4.0 in")
+
+        Case "Stroke_Length"
+            values.Add("6.0 in")
+            values.Add("8.0 in")
+
+        Case "CC"
+            values.Add("5.0 in")
+            values.Add("10.0 in")
+
+        Case "Shoe_Style"
+            values.Add("Long Shoe No Hole (LSNH)")
+            values.Add("Long Shoe 6 Hole (LS6H)")
+            values.Add("Long Shoe 8 Hole (LS8H)")
+            values.Add("Long Shoe Nutbar (LSNB)")
+            values.Add("J-Max")
+            values.Add("J-Max Nutbar (J-Max NB)")
+            values.Add("Long Shoe Pressure Seal (LSPS)")
+            values.Add("Short Shoe No Hole (SHSNH)")
+            values.Add("Short Shoe 6 Hole (SHS6H)")
+            values.Add("Wide Shoe 16 Hole (WS16H)")
+            values.Add("Kwik Klamp (KK)")
+
+        Case "SC"
+            values.Add("3.592 in")
+            values.Add("3.65 in")
+            values.Add("3.781 in")
+            values.Add("4.281 in")
+            values.Add("4.3125 in")
+            values.Add("4.5 in")
+            values.Add("4.594 in")
+            values.Add("5.0 in")
+            values.Add("5.25 in")
+            values.Add("6.0 in")
+            values.Add("10.0 in")
+            values.Add("10.5 in")
+            values.Add("97 mm")
+            values.Add("112 mm")
+            values.Add("160 mm")
+
+        Case "Quantity_of_Shoes"
+            values.Add("0.0 ul")
+            values.Add("6.0 ul")
+            values.Add("7.0 ul")
+            values.Add("8.0 ul")
+            values.Add("9.0 ul")
+            values.Add("12.0 ul")
+            values.Add("13.0 ul")
+            values.Add("14.0 ul")
+            values.Add("15.0 ul")
+            values.Add("16.0 ul")
+            values.Add("17.0 ul")
+            values.Add("18.0 ul")
+            values.Add("19.0 ul")
+            values.Add("20.0 ul")
+            values.Add("21.0 ul")
+            values.Add("22.0 ul")
+            values.Add("23.0 ul")
+            values.Add("24.0 ul")
+            values.Add("25.0 ul")
+            values.Add("26.0 ul")
+            values.Add("27.0 ul")
+            values.Add("30.0 ul")
+
+        Case "Drive_Frame_Style"
+            values.Add("Aluminum Top Mount")
+            values.Add("Steel Top Mount")
+            values.Add("Steel In Rails")
+            values.Add("Outside Perimeter (OSP)")
+
+        Case "Drive_Frame_Gap"
+            values.Add("55.0 in")
+            values.Add("57.0 in")
+
+        Case "Subframe"
+            values.Add("Angle")
+            values.Add("C-Channel")
+            values.Add("I-Beam")
+            values.Add("Multipurpose")
+            values.Add("Rectangle Tube")
+            values.Add("Z-Bar")
+
+        Case "Crossmember_Material"
+            values.Add("Aluminum")
+            values.Add("Steel")
+
+        Case "Finish"
+            values.Add("Grey")
+            values.Add("Galvanized")
+
+        Case "Customer"
+            values.Add("Calderon Trailer Repair Inc")
+            values.Add("Deloupe Inc")
+            values.Add("Di-Mond Sales Inc")
+            values.Add("Dorsey Trailer")
+            values.Add("East Trailers LLC")
+            values.Add("Ferguson Farms Inc")
+            values.Add("Fericar Inc")
+            values.Add("Hale Trailer Brake & Wheel Inc")
+			values.Add("Ingenieria y Desarrollo Tecnologico Ltda")
+            values.Add("Keith Walking Floor Australia")
+            values.Add("Keith Walking Floor Canada")
+            values.Add("Keith Walking Floor Europe")
+            values.Add("Keith Walking Floor India")
+            values.Add("Keith Walking Floor Mexico")
+            values.Add("KNL Holdings LLC")
+            values.Add("Innovative Trailer Mfg Inc")
+            values.Add("Intermountain Trailer")
+            values.Add("Interstate Trailers Inc")
+            values.Add("JES Sales Co. Inc")
+            values.Add("MAC Trailer Mfg")
+            values.Add("Manac Inc")
+            values.Add("MARUWA Co. Ltd")
+            values.Add("M.H. Eby Inc")
+            values.Add("Nippon Trex Co. Ltd")
+            values.Add("Somerset Welding & Steel Inc")
+            values.Add("Spector Mfg Inc")
+            values.Add("Star Trailers Inc")
+            values.Add("Stargate Mfg Inc")
+            values.Add("Summit Trailers LLC")
+            values.Add("Temisko Inc")
+            values.Add("Titan Trailers Inc")
+            values.Add("Travis Body & Trailer Inc")
+            values.Add("The Trailer Co. Inc")
+            values.Add("TYCROP Trailers")
+            values.Add("Warren Equipment Inc")
+            values.Add("Western Trailer Co.")
+            values.Add("Wilkens Ind")
+            values.Add("Wilkens Mfg")
+
+
+    End Select
+
+    Return values
+
+End Function
+
+
+'==================================================
+' APPLY ALL CONTROLS
+'==================================================
+' Used by Verify.
+' Pushes every current form value into the document.
+'==================================================
+
+Sub ApplyAllControls( _
+    ByVal oDoc As Document, _
+    ByVal paramControls As System.Collections.Generic.Dictionary(Of String, System.Windows.Forms.Control))
+
+    For Each kvp As System.Collections.Generic.KeyValuePair(Of String, System.Windows.Forms.Control) In paramControls
+
+        Dim paramName As String = kvp.Key
+        Dim ctrl As System.Windows.Forms.Control = kvp.Value
+
+        Dim expressionValue As String = GetControlValue(ctrl)
+
+        If Trim(expressionValue) <> "" Then
+            SetParameterValue(oDoc, paramName, expressionValue)
+        End If
+
+    Next
+
+End Sub
+
+
+'==================================================
+' GET CONTROL VALUE
+'==================================================
+' Reads the current value from either a ComboBox or TextBox.
+'==================================================
+
+Function GetControlValue(ByVal ctrl As System.Windows.Forms.Control) As String
+
+    If TypeOf ctrl Is System.Windows.Forms.ComboBox Then
+
+        Dim cbo As System.Windows.Forms.ComboBox = _
+            CType(ctrl, System.Windows.Forms.ComboBox)
+
+        If cbo.SelectedItem Is Nothing Then Return ""
+
+        Return CStr(cbo.SelectedItem)
+
+    ElseIf TypeOf ctrl Is System.Windows.Forms.TextBox Then
+
+        Dim txt As System.Windows.Forms.TextBox = _
+            CType(ctrl, System.Windows.Forms.TextBox)
+
+        Return txt.Text
+
+    End If
+
+    Return ""
+
+End Function
+
+
+'==================================================
+' GET USER PARAMETERS
+'==================================================
+' Returns user parameters from a part or assembly.
+'==================================================
+
+Function GetUserParameters(ByVal oDoc As Document) As UserParameters
+
+    Try
+
+        If oDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            Dim oAsm As AssemblyDocument = CType(oDoc, AssemblyDocument)
+            Return oAsm.ComponentDefinition.Parameters.UserParameters
+
+        ElseIf oDoc.DocumentType = DocumentTypeEnum.kPartDocumentObject Then
+
+            Dim oPart As PartDocument = CType(oDoc, PartDocument)
+            Return oPart.ComponentDefinition.Parameters.UserParameters
+
+        End If
+
+    Catch
+    End Try
+
+    Return Nothing
+
+End Function
+
+
+'==================================================
+' GET USER PARAMETER
+'==================================================
+' Safely gets one user parameter by name.
+'==================================================
+
+Function GetUserParameter( _
+    ByVal oDoc As Document, _
+    ByVal paramName As String) As UserParameter
+
+    Try
+
+        Dim oParams As UserParameters = GetUserParameters(oDoc)
+
+        If oParams Is Nothing Then Return Nothing
+
+        Return oParams.Item(paramName)
+
+    Catch
+
+        Return Nothing
+
+    End Try
+
+End Function
+
+
+'==================================================
+' GET PARAMETER DISPLAY VALUE
+'==================================================
+' Text and Boolean parameters use Value.
+'
+' Numeric/unit parameters first try the exported
+' custom iProperty because that respects parameter
+' custom property formatting like:
+'
+'   48.0 in
+'   60.0 in
+'   40.0 in
+'
+' If the custom iProperty does not exist yet, it
+' falls back to the parameter expression.
+'==================================================
+
+Function GetParameterDisplayValue( _
+    ByVal oDoc As Document, _
+    ByVal paramName As String) As String
+
+    Try
+
+        Dim oParam As UserParameter = GetUserParameter(oDoc, paramName)
+
+        If oParam Is Nothing Then Return ""
+
+        If IsTextOrBooleanParameter(oParam) Then
+            Return CStr(oParam.Value)
+        End If
+
+        '==================================================
+        ' NUMERIC / LENGTH PARAMETER
+        ' Get the exposed custom iProperty value first.
+        ' This should show 48.0 in instead of 48 in.
+        '==================================================
+
+        Try
+
+            Dim propValue As String = SafeProperty(oDoc, paramName)
+
+            If Trim(propValue) <> "" Then
+                Return propValue
+            End If
+
+        Catch
+        End Try
+
+        '==================================================
+        ' FALLBACK
+        '==================================================
+
+        Try
+            Return FormatDisplayedExpression(oParam.Expression)
+        Catch
+            Return oParam.Expression
+        End Try
+
+    Catch
+
+        Return ""
+
+    End Try
+
+End Function
+
+
+'==================================================
+' FORMAT DISPLAYED EXPRESSION
+'==================================================
+' Converts:
+'
+'   48 in    -> 48.0 in
+'   60 in    -> 60.0 in
+'   40 in    -> 40.0 in
+'   31.5 in  -> 31.5 in
+'
+' Used for form display.
+'==================================================
+
+Function FormatDisplayedExpression( _
+    ByVal expressionText As String) As String
+
+    Try
+
+        Dim s As String = Trim(expressionText)
+
+        If s = "" Then Return ""
+
+        Dim lowerS As String = LCase(s)
+
+        If Not lowerS.Contains("in") Then
+            Return s
+        End If
+
+        Dim numberText As String = lowerS
+
+        numberText = Replace(numberText, "inches", "")
+        numberText = Replace(numberText, "inch", "")
+        numberText = Replace(numberText, " in", "")
+        numberText = Replace(numberText, "in", "")
+        numberText = Trim(numberText)
+
+        If numberText = "" Then Return s
+
+        Dim numericValue As Double = 0
+
+        If Not Double.TryParse(numberText, numericValue) Then
+            Return s
+        End If
+
+        If numberText.Contains(".") Then
+
+            Return numberText & " in"
+
+        Else
+
+            Return numericValue.ToString("0.0") & " in"
+
+        End If
+
+    Catch
+
+        Return expressionText
+
+    End Try
+
+End Function
+
+
+
+
+
+'==================================================
+' SET PARAMETER VALUE
+'==================================================
+' Text and Boolean parameters use Value.
+' Numeric/unit parameters use Expression.
+'
+' For inch values:
+'   33      -> 33.0 in
+'   33 in   -> 33.0 in
+'   33.0    -> 33.0 in
+'   33.25   -> 33.25 in
+'
+' This prevents whole inch dimensions from being
+' stored without the .0 needed for Vault searching.
+'==================================================
+Sub SetParameterValue( _
+    ByVal oDoc As Document, _
+    ByVal paramName As String, _
+    ByVal expressionValue As String)
+
+    If Trim(expressionValue) = "" Then Exit Sub
+
+    Dim oParam As UserParameter = GetUserParameter(oDoc, paramName)
+
+    If oParam Is Nothing Then Exit Sub
+
+    Try
+
+        If IsTextOrBooleanParameter(oParam) Then
+
+            If IsBooleanParameter(oParam) Then
+                oParam.Value = CBool(expressionValue)
+            Else
+                oParam.Value = expressionValue
+            End If
+
+        Else
+
+            Dim expr As String = FormatUserEnteredParameterExpression( _
+                oParam, _
+                expressionValue)
+
+            oParam.Expression = expr
+
+        End If
+
+    Catch ex As Exception
+
+        Throw New Exception( _
+            "Parameter: " & paramName & vbCrLf & _
+            "Value: " & expressionValue & vbCrLf & vbCrLf & _
+            ex.Message)
+
+    End Try
+
+End Sub
+
+
+
+'==================================================
+' FORMAT USER ENTERED PARAMETER EXPRESSION
+'==================================================
+' Keeps whole inch values as one decimal place.
+'
+' Examples:
+'   33       -> 33.0 in
+'   33 in    -> 33.0 in
+'   33.0     -> 33.0 in
+'   33.25    -> 33.25 in
+'   33.25 in -> 33.25 in
+'==================================================
+Function FormatUserEnteredParameterExpression( _
+    ByVal oParam As UserParameter, _
+    ByVal rawValue As String) As String
+
+    Dim expr As String = Trim(rawValue)
+
+    If expr = "" Then Return expr
+
+    Dim lowerExpr As String = LCase(expr)
+
+    '==================================================
+    ' ONLY FORMAT LENGTH PARAMETERS USING INCHES
+    '==================================================
+    Dim unitsText As String = ""
+
+    Try
+        unitsText = LCase(CStr(oParam.Units))
+    Catch
+        unitsText = ""
+    End Try
+
+    Dim usesInches As Boolean = False
+
+    If lowerExpr.Contains("in") Then
+        usesInches = True
+    ElseIf unitsText = "in" Or unitsText = "inch" Or unitsText = "inches" Then
+        usesInches = True
+    End If
+
+    If usesInches = False Then
+        Return expr
+    End If
+
+    '==================================================
+    ' REMOVE UNIT TEXT SO WE CAN FORMAT THE NUMBER
+    '==================================================
+    Dim numberText As String = lowerExpr
+
+    numberText = Replace(numberText, "inches", "")
+    numberText = Replace(numberText, "inch", "")
+    numberText = Replace(numberText, " in", "")
+    numberText = Replace(numberText, "in", "")
+    numberText = Trim(numberText)
+
+    If numberText = "" Then Return expr
+
+    Dim numericValue As Double = 0
+
+    If Double.TryParse(numberText, numericValue) = False Then
+        Return expr
+    End If
+
+    '==================================================
+    ' WHOLE NUMBERS GET ONE DECIMAL PLACE
+    ' DECIMAL NUMBERS KEEP THEIR DECIMAL VALUE
+    '==================================================
+    If numberText.Contains(".") Then
+
+        Return numberText & " in"
+
+    Else
+
+        Return numericValue.ToString("0.0") & " in"
+
+    End If
+
+End Function
+
+
+'==================================================
+' PARAMETER TYPE CHECKS
+'==================================================
+
+Function IsTextOrBooleanParameter(ByVal oParam As UserParameter) As Boolean
+
+    Try
+
+        Dim unitText As String = UCase(CStr(oParam.Units))
+
+        If unitText = "TEXT" Then Return True
+        If unitText = "BOOLEAN" Then Return True
+        If unitText = "TRUE/FALSE" Then Return True
+
+    Catch
+    End Try
+
+    Return False
+
+End Function
+
+
+Function IsBooleanParameter(ByVal oParam As UserParameter) As Boolean
+
+    Try
+
+        Dim unitText As String = UCase(CStr(oParam.Units))
+
+        If unitText = "BOOLEAN" Then Return True
+        If unitText = "TRUE/FALSE" Then Return True
+
+    Catch
+    End Try
+
+    Return False
+
+End Function
+
+
+'==================================================
+' GET NUMERIC PARAMETER VALUE
+'==================================================
+' Gets the numeric part of a parameter expression.
+' Example:
+'   "10.0 in" becomes 10.0
+'==================================================
+
+Function GetParameterNumericValue( _
+    ByVal oDoc As Document, _
+    ByVal paramName As String) As Double
+
+    Dim displayValue As String = GetParameterDisplayValue(oDoc, paramName)
+
+    Dim numberValue As Double = 0
+
+    If TryGetNumber(displayValue, numberValue) Then
+        Return numberValue
+    End If
+
+    Return 0
+
+End Function
+
+
+'==================================================
+' TRY GET NUMBER
+'==================================================
+' Removes common units before converting to a number.
+'==================================================
+
+Function TryGetNumber( _
+    ByVal inputValue As String, _
+    ByRef numberValue As Double) As Boolean
+
+    Try
+
+        Dim cleanValue As String = inputValue
+
+        cleanValue = UCase(cleanValue)
+        cleanValue = Replace(cleanValue, "IN", "")
+        cleanValue = Replace(cleanValue, "MM", "")
+        cleanValue = Replace(cleanValue, "UL", "")
+        cleanValue = Replace(cleanValue, Chr(34), "")
+        cleanValue = Trim(cleanValue)
+
+        numberValue = CDbl(cleanValue)
+
+        Return True
+
+    Catch
+
+        numberValue = 0
+        Return False
+
+    End Try
+
+End Function
+
+
+
+
+'==================================================
+' UPDATE DOCUMENT
+'==================================================
+' Forces iLogic parameter output and Inventor update.
+' This is what makes the assembly start adapting before
+' the description/search rules read the values.
+'==================================================
+
+Sub UpdateDocument(ByVal oDoc As Document)
+
+    If oDoc Is Nothing Then Exit Sub
+
+    ' Push the iLogic parameter changes out to Inventor first.
+    Try
+        RuleParametersOutput()
+    Catch
+    End Try
+
+    Try
+        iLogicVb.UpdateWhenDone = True
+    Catch
+    End Try
+
+    ' Force Inventor to solve the model.
+    Try
+        oDoc.Update2(True)
+    Catch
+        Try
+            oDoc.Update()
+        Catch
+        End Try
+    End Try
+
+    ' Extra update pass for adaptive/derived geometry.
+    Try
+        InventorVb.DocumentUpdate()
+    Catch
+    End Try
+
+    ' Refresh graphics.
+    Try
+        ThisApplication.ActiveView.Update()
+    Catch
+    End Try
+
+End Sub
+
+
+
+
+'==================================================
+' VERIFY DRIVE CONFIGURATION
+'==================================================
+' Compares selected custom properties from parent to children.
+'==================================================
+
+Function VerifyDriveConfiguration(ByVal oDoc As Document) As String
+
+    Dim report As String = ""
+
+    Try
+
+        If oDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+            Return "Verification can only run from the top-level drive assembly."
+        End If
+
+        Dim oAsm As AssemblyDocument = CType(oDoc, AssemblyDocument)
+        Dim oDef As AssemblyComponentDefinition = oAsm.ComponentDefinition
+
+        For Each oOcc As ComponentOccurrence In oDef.Occurrences
+            CheckOccurrenceRecursive(oDoc, oOcc, report)
+        Next
+
+    Catch ex As Exception
+
+        report &= vbCrLf & _
+                  "FAILED VERIFY: " & ex.Message
+
+    End Try
+
+    Return report
+
+End Function
+
+
+'==================================================
+' CHECK OCCURRENCE RECURSIVE
+'==================================================
+' Walks the full assembly tree.
+' This does not rely on a fixed subassembly structure.
+'==================================================
+
+Sub CheckOccurrenceRecursive( _
+    ByVal oParentDoc As Document, _
+    ByVal oOcc As ComponentOccurrence, _
+    ByRef report As String)
+
+    Try
+
+        If oOcc.Suppressed Then Exit Sub
+
+        Dim oChildDoc As Document = oOcc.Definition.Document
+
+        If oChildDoc Is Nothing Then Exit Sub
+
+        CompareProperty(oParentDoc, oChildDoc, "System", report)
+        CompareProperty(oParentDoc, oChildDoc, "Controls", report)
+        CompareProperty(oParentDoc, oChildDoc, "Valve_Mount_Style", report)
+
+        CompareProperty(oParentDoc, oChildDoc, "Bore_Size", report)
+        CompareProperty(oParentDoc, oChildDoc, "Stroke_Length", report)
+        CompareProperty(oParentDoc, oChildDoc, "CC", report)
+        CompareProperty(oParentDoc, oChildDoc, "SC", report)
+
+        CompareProperty(oParentDoc, oChildDoc, "Shoe_Style", report)
+        CompareProperty(oParentDoc, oChildDoc, "Quantity_of_Shoes", report)
+
+        CompareProperty(oParentDoc, oChildDoc, "Drive_Frame_Style", report)
+        CompareProperty(oParentDoc, oChildDoc, "Drive_Frame_Gap", report)
+
+        CompareProperty(oParentDoc, oChildDoc, "Outside_Dimension", report)
+        CompareProperty(oParentDoc, oChildDoc, "Inside_Dimension", report)
+
+        CompareProperty(oParentDoc, oChildDoc, "Crossmember_Material", report)
+        CompareProperty(oParentDoc, oChildDoc, "Crossmember_Height", report)
+        CompareProperty(oParentDoc, oChildDoc, "Crossmember_Width", report)
+
+        CompareProperty(oParentDoc, oChildDoc, "Finish", report)
+        CompareProperty(oParentDoc, oChildDoc, "Customer", report)
+        CompareProperty(oParentDoc, oChildDoc, "Customer_Crossmember_Height", report)
+
+        CompareProperty(oParentDoc, oChildDoc, "Subframe", report)
+        CompareProperty(oParentDoc, oChildDoc, "Subframe_Width", report)
+
+        If oOcc.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            Dim oSubDef As AssemblyComponentDefinition = _
+                TryCast(oOcc.Definition, AssemblyComponentDefinition)
+
+            If Not oSubDef Is Nothing Then
+
+                For Each oSubOcc As ComponentOccurrence In oSubDef.Occurrences
+                    CheckOccurrenceRecursive(oParentDoc, oSubOcc, report)
+                Next
+
+            End If
+
+        End If
+
+    Catch ex As Exception
+
+        report &= vbCrLf & _
+                  "FAILED: " & oOcc.Name & _
+                  " - " & ex.Message
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' COMPARE PROPERTY
+'==================================================
+' Compares one custom property between parent and child.
+'==================================================
+
+Sub CompareProperty( _
+    ByVal oParentDoc As Document, _
+    ByVal oChildDoc As Document, _
+    ByVal propName As String, _
+    ByRef report As String)
+
+    Try
+
+        If Not PropertyExists(oChildDoc, propName) Then Exit Sub
+
+        Dim parentValue As String = SafeProperty(oParentDoc, propName)
+        Dim childValue As String = SafeProperty(oChildDoc, propName)
+
+        parentValue = Trim(UCase(parentValue))
+        childValue = Trim(UCase(childValue))
+
+        If parentValue <> childValue Then
+
+            report &= vbCrLf & _
+                      oChildDoc.DisplayName & vbCrLf & _
+                      "  Property : " & propName & vbCrLf & _
+                      "  Parent   : " & parentValue & vbCrLf & _
+                      "  Child    : " & childValue & vbCrLf
+
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+'==================================================
+' PROPERTY EXISTS
+'==================================================
+
+Function PropertyExists( _
+    ByVal oDoc As Document, _
+    ByVal propName As String) As Boolean
+
+    Try
+
+        Dim oSet As PropertySet = _
+            oDoc.PropertySets.Item("Inventor User Defined Properties")
+
+        Dim oProp As Inventor.Property = oSet.Item(propName)
+
+        Return True
+
+    Catch
+
+        Return False
+
+    End Try
+
+End Function
+
+
+'==================================================
+' SAFE PROPERTY READ
+'==================================================
+
+Function SafeProperty( _
+    ByVal oDoc As Document, _
+    ByVal propName As String) As String
+
+    Try
+
+        Dim oSet As PropertySet = _
+            oDoc.PropertySets.Item("Inventor User Defined Properties")
+
+        Return CStr(oSet.Item(propName).Value)
+
+    Catch
+
+        Return ""
+
+    End Try
+
+End Function
+
+
+'==================================================
+' DEFAULT NON-WIDE SHOE
+'==================================================
+' Used when switching away from Wide Shoe.
+'==================================================
+
+Function GetDefaultNonWideShoe(ByVal boreValue As Double) As String
+
+    If Math.Abs(boreValue - 3.5) < 0.0001 Then
+        Return "Long Shoe 8 Hole (LS8H)"
+    End If
+
+    Return "Long Shoe 6 Hole (LS6H)"
+
+End Function
+
+
+'==================================================
+' DEFAULT ALLOWED SHOE
+'==================================================
+' Keeps current shoe if valid.
+' Otherwise returns a valid shoe for the bore size.
+'==================================================
+
+Function GetDefaultAllowedShoe( _
+    ByVal oDoc As Document, _
+    ByVal boreValue As Double, _
+    ByVal currentShoeStyle As String) As String
+
+    If Math.Abs(boreValue - 3.0) < 0.0001 Then
+
+        If currentShoeStyle = "LONG SHOE 8 HOLE (LS8H)" Then
+            Return "Long Shoe 6 Hole (LS6H)"
+        End If
+
+    ElseIf Math.Abs(boreValue - 3.5) < 0.0001 Then
+
+        If currentShoeStyle = "LONG SHOE 6 HOLE (LS6H)" Or _
+           currentShoeStyle = "SHORT SHOE 6 HOLE (SHS6H)" Then
+
+            Return "Long Shoe 8 Hole (LS8H)"
+
+        End If
+
+    End If
+
+    Return GetParameterDisplayValue(oDoc, "Shoe_Style")
+
+End Function
+
+
+'==================================================
+' UPDATE COMPONENT DESCRIPTIONS
+'==================================================
+' Runs the Generate Descriptions rule in preview mode.
+'
+' This is called twice during initialization:
+'
+'   1. Before live search:
+'      Builds generated descriptions for new parts.
+'
+'   2. After live search:
+'      Allows the description rule to use any Vault
+'      file paths found by the search rule.
+'
+' Required SharedVariables:
+'
+'   DriveConfig_DescriptionPreviewOnly
+'
+' Description Rule should output:
+'
+'   DriveConfig_DESC_DRIVE_ASSY
+'   DriveConfig_DESC_CROSSMEMBER
+'   DriveConfig_DESC_DRIVE_FRAME
+'   DriveConfig_DESC_DRIVE_CORE
+'   DriveConfig_DESC_CROSS_DRIVE_SET
+'   DriveConfig_DESC_UPPER_CROSS_DRIVE_SUPPORT
+'   DriveConfig_DESC_SERIAL_PLATE
+'   DriveConfig_DESC_CYLINDER_MOUNT
+'   DriveConfig_DESC_CYLINDER_MOUNT_ASSY
+'   DriveConfig_DESC_STIFFENER
+'==================================================
+
+Sub UpdateComponentDescriptions( _
+    ByVal oDoc As Document, _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow))
+
+    If componentRows Is Nothing Then Exit Sub
+
+    '--------------------------------------------------
+    ' Make sure parameters/model are current before
+    ' the description rule reads values.
+    '--------------------------------------------------
+
+    Try
+        If Not oDoc Is Nothing Then
+            UpdateDocument(oDoc)
+        End If
+    Catch
+    End Try
+
+    '--------------------------------------------------
+    ' Tell the description rule to only populate
+    ' SharedVariables and not write/save files.
+    '--------------------------------------------------
+
+    Try
+        SharedVariable("DriveConfig_DescriptionPreviewOnly") = True
+    Catch
+    End Try
+
+    '--------------------------------------------------
+    ' Run the actual Generate Descriptions rule.
+    '--------------------------------------------------
+
+    Try
+
+        RunDescriptionRuleSafe()
+
+    Catch ex As Exception
+
+        Try
+            SharedVariable("DriveConfig_DescriptionPreviewOnly") = False
+        Catch
+        End Try
+
+        MessageBox.Show( _
+            "Description preview failed." & vbCrLf & vbCrLf & _
+            ex.Message, _
+            "Drive Configurator")
+
+        Exit Sub
+
+    End Try
+
+    '--------------------------------------------------
+    ' Turn preview mode back off.
+    '--------------------------------------------------
+
+    Try
+        SharedVariable("DriveConfig_DescriptionPreviewOnly") = False
+    Catch
+    End Try
+
+
+End Sub
+
+
+Sub InitializeConfiguratorData( _
+    ByVal oDoc As Document, _
+    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow), _
+    ByVal txtComponentPNReport As System.Windows.Forms.TextBox)
+
+    If oDoc Is Nothing Then Exit Sub
+
+    EnforceDynamicRules(oDoc)
+
+    UpdateDocument(oDoc)
+
+    '------------------------------------------
+    ' SEARCH FIRST
+    '------------------------------------------
+
+	RunLiveSearchAndUpdateWorkspace( _
+	    oDoc, _
+	    componentRows, _
+	    txtComponentPNReport)
+
+
+    '------------------------------------------
+    ' DESCRIPTIONS SECOND
+    '------------------------------------------
+
+    UpdateComponentDescriptions( _
+        oDoc, _
+        componentRows)
+
+    '------------------------------------------
+    ' FINAL UI REFRESH
+    '------------------------------------------
+
+    UpdateComponentPartNumberWorkspaceFromShared( _
+        componentRows, _
+        txtComponentPNReport)
+
+
+End Sub
+
+
+'==================================================
+' RUN SEARCH RULE SAFE
+'==================================================
+' Runs the live search / search-replace rule.
+'
+' Tries folder-qualified name first.
+' Then tries plain external rule name.
+'==================================================
+
+Sub RunSearchRuleSafe()
+
+    Try
+        iLogicVb.RunExternalRule( _
+            "Drive Assembly Configurator\Drive Assembly Configurator - Searches Replaces and Creates Drawings")
+        Exit Sub
+    Catch
+    End Try
+
+    Try
+        iLogicVb.RunExternalRule( _
+            "Drive Assembly Configurator - Searches Replaces and Creates Drawings")
+        Exit Sub
+    Catch ex As Exception
+
+        Throw New Exception( _
+            "Could not run Search / Replace rule." & vbCrLf & vbCrLf & _
+            "Tried:" & vbCrLf & _
+            "Drive Assembly Configurator\Drive Assembly Configurator - Searches Replaces and Creates Drawings" & vbCrLf & _
+            "Drive Assembly Configurator - Searches Replaces and Creates Drawings" & vbCrLf & vbCrLf & _
+            ex.Message)
+
+    End Try
+
+End Sub
+
+
+'==================================================
+' RUN DESCRIPTION RULE SAFE
+'==================================================
+' Runs the Generate Descriptions external rule.
+'
+' Tries:
+'   1. Folder-qualified external rule name
+'   2. Plain external rule name
+'
+' Actual rule name:
+'   Drive Assembly Configurator - Generate Descriptions
+'==================================================
+
+Sub RunDescriptionRuleSafe()
+
+    Try
+        iLogicVb.RunExternalRule( _
+            "Drive Assembly Configurator\Drive Assembly Configurator - Generates Descriptions")
+        Exit Sub
+    Catch
+    End Try
+
+    Try
+        iLogicVb.RunExternalRule( _
+            "Drive Assembly Configurator - Generates Descriptions")
+        Exit Sub
+    Catch ex As Exception
+
+        Throw New Exception( _
+            "Could not run Generate Descriptions rule." & vbCrLf & vbCrLf & _
+            "Tried:" & vbCrLf & _
+            "Drive Assembly Configurator\Drive Assembly Configurator - Generates Descriptions" & vbCrLf & _
+            "Drive Assembly Configurator - Generates Descriptions" & vbCrLf & vbCrLf & _
+            ex.Message)
+
+    End Try
+
+End Sub
+
+
+''==================================================
+'' UPDATE DESCRIPTION BOXES FROM SHARED VARIABLES
+''==================================================
+'' Reads the DriveConfig_DESC_* shared variables and
+'' displays the current description beside each component.
+''==================================================
+
+'Sub UpdateDescriptionBoxesFromShared( _
+'    ByVal componentRows As System.Collections.Generic.List(Of ComponentWorkspaceRow))
+
+'    If componentRows Is Nothing Then Exit Sub
+
+'    For Each Row As ComponentWorkspaceRow In componentRows
+
+'        If Row Is Nothing Then Continue For
+'        If Row.TxtDescription Is Nothing Then Continue For
+
+'        Row.TxtDescription.Text = _
+'            GetSharedText("DriveConfig_DESC_" & Row.PNKey)
+
+'    Next
+
+'End Sub
+

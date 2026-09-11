@@ -1,0 +1,163 @@
+﻿Sub Main()
+
+    Try
+
+        Try
+            iLogicForm.CloseAllForms()
+        Catch
+        End Try
+
+        Dim sourceOptions As New System.Collections.ArrayList
+
+        sourceOptions.Add("Aluminum Top Mount")
+        sourceOptions.Add("Steel Top Mount")
+        sourceOptions.Add("Steel In Rails")
+        sourceOptions.Add("Outside Perimeter (OSP)")
+
+        Dim selectedStyle As String = InputListBox( _
+            "Select the source Drive Assembly type to open.", _
+            sourceOptions, _
+            sourceOptions.Item(0), _
+            "Open Source Drive Assembly", _
+            "Drive Frame Style")
+
+        If Trim(selectedStyle) = "" Then Exit Sub
+
+        Dim sourcePartNumber As String = ""
+        Dim templatePartNumbers As New System.Collections.ArrayList
+
+        Select Case UCase(Trim(selectedStyle))
+
+            Case "ALUMINUM TOP MOUNT"
+
+                sourcePartNumber = "12429101"
+
+                templatePartNumbers.Add("12429101")
+                templatePartNumbers.Add("12429102")
+                templatePartNumbers.Add("12429103")
+                templatePartNumbers.Add("12429104")
+
+            Case "STEEL TOP MOUNT"
+
+                sourcePartNumber = "12429201"
+
+                templatePartNumbers.Add("12429201")
+                templatePartNumbers.Add("12429202")
+                templatePartNumbers.Add("12429203")
+                templatePartNumbers.Add("12429204")
+                templatePartNumbers.Add("12429205")
+                templatePartNumbers.Add("12429206")
+
+            Case "STEEL IN RAILS"
+
+                sourcePartNumber = "12429301"
+				
+'				NEED TO FINISH TEMPLATE
+'				templatePartNumbers.Add("12429301")
+'                templatePartNumbers.Add("12429302")
+'                templatePartNumbers.Add("12429303")
+'                templatePartNumbers.Add("12429304")
+'                templatePartNumbers.Add("12429305")
+'                templatePartNumbers.Add("12429306")
+
+            Case "OUTSIDE PERIMETER (OSP)"
+
+                sourcePartNumber = "12429401"
+				
+				
+'				NEED TO FINISH TEMPLATE				
+'				templatePartNumbers.Add("12429401")
+'                templatePartNumbers.Add("12429402")
+'                templatePartNumbers.Add("12429403")
+'                templatePartNumbers.Add("12429404")
+'                templatePartNumbers.Add("12429405")
+'                templatePartNumbers.Add("12429406")
+
+            Case Else
+
+                Exit Sub
+
+        End Select
+
+        '====================================================
+        ' GET SOURCE ASSEMBLY FROM VAULT
+        '====================================================
+        Dim searchParams As New _
+            System.Collections.Generic.Dictionary(Of String, String)
+
+        searchParams.Add("Part Number", sourcePartNumber)
+
+        Dim vaultFile As String = _
+            iLogicVault.GetFileBySearchCriteria( _
+                searchParams, _
+                True, _
+                False)
+
+        If String.IsNullOrEmpty(vaultFile) Then
+
+            MessageBox.Show( _
+                "Source assembly was not found in Vault:" & _
+                vbCrLf & vbCrLf & _
+                sourcePartNumber, _
+                "Vault File Missing")
+
+            Exit Sub
+
+        End If
+
+        '====================================================
+        ' DOWNLOAD TEMPLATE FILES
+        '
+        ' 01 -> GET .IAM + .IDW
+        ' OTHERS -> GET .IDW
+        '====================================================
+        For Each pn As String In templatePartNumbers
+
+            Try
+
+                If pn.EndsWith("01") Then
+
+                    Dim iamSearch As New _
+                        System.Collections.Generic.Dictionary(Of String, String)
+
+                    iamSearch.Add("File Name", pn & ".iam")
+
+                    iLogicVault.GetFileBySearchCriteria( _
+                        iamSearch, _
+                        True, _
+                        False)
+
+                End If
+
+                Dim idwSearch As New _
+                    System.Collections.Generic.Dictionary(Of String, String)
+
+                idwSearch.Add("File Name", pn & ".idw")
+
+                iLogicVault.GetFileBySearchCriteria( _
+                    idwSearch, _
+                    True, _
+                    False)
+
+            Catch
+            End Try
+
+        Next
+
+        '====================================================
+        ' OPEN LOCAL WORKSPACE COPY
+        '====================================================
+        Dim sourceDoc As Document = _
+            ThisApplication.Documents.Open(vaultFile, True)
+
+        sourceDoc.Activate()
+
+    Catch ex As Exception
+
+        MessageBox.Show( _
+            ex.Message, _
+            "Open Source Drive Assembly")
+
+    End Try
+
+End Sub

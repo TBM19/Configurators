@@ -1,0 +1,819 @@
+﻿Sub Main()
+
+    Dim oAsm As AssemblyDocument = TryCast(ThisDoc.Document, AssemblyDocument)
+
+    If oAsm Is Nothing Then
+        MessageBox.Show("Run this rule in an assembly.", "iLogic")
+        Exit Sub
+    End If
+
+    Parameter.Quiet = True
+
+    Dim sw As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+    Dim maxSeconds As Double = 15
+    Dim timedOut As Boolean = False
+
+    Dim paramNames As String() = {
+        "System",
+        "Controls",
+        "Valve_Mount_Style",
+        "Bore_Size",
+        "Stroke_Length",
+        "CC",
+        "Shoe_Style",
+        "SC",
+        "Quantity_of_Shoes",
+        "Drive_Frame_Style",
+        "Drive_Frame_Gap",
+        "Outside_Dimension",
+        "Inside_Dimension",
+        "Crossmember_Material",
+        "Crossmember_Height",
+        "Crossmember_Width",
+        "Customer",
+        "Customer_Crossmember_Height",
+        "Subframe",
+        "Subframe_Width"
+    }
+
+    Dim topSystem As String = ""
+
+    Try
+        topSystem = CStr(Parameter("System"))
+    Catch
+        topSystem = ""
+    End Try
+
+    Dim processedCount As Integer = 0
+    Dim pushedCount As Integer = 0
+    Dim report As String = ""
+
+    Dim driveFrameFound As Boolean = False
+    Dim cylinderMountFound As Boolean = False
+    Dim cylinderMountAssyFound As Boolean = False
+    Dim stiffenerFound As Boolean = False
+    Dim crossmemberFound As Boolean = False
+
+    Dim updatedComponents As New System.Collections.Generic.List(Of String)
+
+    '====================================================
+    ' FIND / PUSH TO DRIVE FRAME ANYWHERE
+    '====================================================
+    ProcessAllOccurrencesByTitleAnywhere(
+        oAsm,
+        "DRIVE FRAME",
+        paramNames,
+        topSystem,
+        driveFrameFound,
+        processedCount,
+        pushedCount,
+        updatedComponents,
+        report,
+        sw,
+        maxSeconds,
+        timedOut)
+
+    '====================================================
+    ' FIND / PUSH TO CYLINDER MOUNT ANYWHERE
+    '====================================================
+    ProcessAllOccurrencesByTitleAnywhere(
+        oAsm,
+        "CYLINDER MOUNT",
+        paramNames,
+        topSystem,
+        cylinderMountFound,
+        processedCount,
+        pushedCount,
+        updatedComponents,
+        report,
+        sw,
+        maxSeconds,
+        timedOut)
+
+    '====================================================
+    ' FIND / PUSH TO CYLINDER MOUNT ASSY ANYWHERE
+    '====================================================
+    ProcessAllOccurrencesByTitleAnywhere(
+        oAsm,
+        "CYLINDER MOUNT ASSEMBLY",
+        paramNames,
+        topSystem,
+        cylinderMountAssyFound,
+        processedCount,
+        pushedCount,
+        updatedComponents,
+        report,
+        sw,
+        maxSeconds,
+        timedOut)
+
+    '====================================================
+    ' FIND / PUSH TO STIFFENER ANYWHERE
+    '====================================================
+    ProcessAllOccurrencesByTitleAnywhere(
+        oAsm,
+        "STIFFENER",
+        paramNames,
+        topSystem,
+        stiffenerFound,
+        processedCount,
+        pushedCount,
+        updatedComponents,
+        report,
+        sw,
+        maxSeconds,
+        timedOut)
+
+    '====================================================
+    ' FIND / PUSH TO CROSSMEMBER ANYWHERE
+    '====================================================
+    ProcessAllOccurrencesByTitleAnywhere(
+        oAsm,
+        "CROSSMEMBER",
+        paramNames,
+        topSystem,
+        crossmemberFound,
+        processedCount,
+        pushedCount,
+        updatedComponents,
+        report,
+        sw,
+        maxSeconds,
+        timedOut)
+
+    Parameter.Quiet = False
+
+    Dim msg As String =
+        "Parameter push complete." & vbCrLf &
+        "ONLY these Title iProperties were allowed to update:" & vbCrLf &
+        "- DRIVE FRAME" & vbCrLf &
+        "- CYLINDER MOUNT" & vbCrLf &
+        "- CYLINDER MOUNT ASSEMBLY" & vbCrLf &
+        "- STIFFENER" & vbCrLf &
+        "- CROSSMEMBER" & vbCrLf & vbCrLf &
+        "Drive Frame found: " & driveFrameFound & vbCrLf &
+        "Cylinder Mount found: " & cylinderMountFound & vbCrLf &
+        "Cylinder Mount Assembly found: " & cylinderMountAssyFound & vbCrLf &
+        "Stiffener found: " & stiffenerFound & vbCrLf &
+        "Crossmember found: " & crossmemberFound & vbCrLf &
+        "Components updated: " & processedCount & vbCrLf &
+        "Parameters pushed: " & pushedCount & vbCrLf
+
+    If timedOut Then
+        msg &= vbCrLf & "Rule stopped because it ran longer than 15 seconds." & vbCrLf
+    End If
+
+    msg &= vbCrLf & "Updated components:" & vbCrLf
+
+    If updatedComponents.Count = 0 Then
+        msg &= "None" & vbCrLf
+    Else
+        For Each compName As String In updatedComponents
+            msg &= "- " & compName & vbCrLf
+        Next
+    End If
+
+    If Trim(report) <> "" Then
+        msg &= vbCrLf & "Notes / Errors:" & vbCrLf & report
+    End If
+	
+	'====================================================
+	' UPDATE DRIVE ASSEMBLY iPROPERTIES
+	'====================================================
+	Try
+	
+	    Dim inventorUserName As String =
+	        Trim(CStr(ThisApplication.GeneralOptions.UserName))
+	
+	    If inventorUserName <> "" Then
+	
+	        ' Author
+	        oAsm.PropertySets.Item(
+	            "Inventor Summary Information") _
+	            .Item("Author").Value = inventorUserName
+	
+	        ' Designer
+	        oAsm.PropertySets.Item(
+	            "Design Tracking Properties") _
+	            .Item("Designer").Value = inventorUserName
+	
+	    End If
+	
+	    ' Project
+	    oAsm.PropertySets.Item(
+	        "Design Tracking Properties") _
+	        .Item("Project").Value = "MOBILE"
+	
+	    ' Creation Date
+	    oAsm.PropertySets.Item(
+	        "Design Tracking Properties") _
+	        .Item("Creation Time").Value = Now
+	
+	Catch ex As Exception
+	
+	    report &= "Drive Assembly iProperty Error: " _
+	           & ex.Message _
+	           & vbCrLf
+	
+	End Try
+		
+
+    MessageBox.Show(msg, "iLogic")
+
+End Sub
+
+
+'====================================================
+' PROCESS ALL OCCURRENCES WITH THIS TITLE ANYWHERE
+'====================================================
+Sub ProcessAllOccurrencesByTitleAnywhere(
+    oAsm As AssemblyDocument,
+    targetTitle As String,
+    paramNames() As String,
+    topSystem As String,
+    ByRef foundFlag As Boolean,
+    ByRef processedCount As Integer,
+    ByRef pushedCount As Integer,
+    ByRef updatedComponents As System.Collections.Generic.List(Of String),
+    ByRef report As String,
+    sw As System.Diagnostics.Stopwatch,
+    maxSeconds As Double,
+    ByRef timedOut As Boolean)
+
+    If timedOut Then Exit Sub
+
+    Dim foundOccs As New System.Collections.Generic.List(Of ComponentOccurrence)
+
+    FindOccurrencesByTitleInAssembly(
+        oAsm,
+        targetTitle,
+        foundOccs,
+        sw,
+        maxSeconds,
+        timedOut)
+
+    If foundOccs.Count > 0 Then
+        foundFlag = True
+    End If
+
+    For Each oOcc As ComponentOccurrence In foundOccs
+
+        If timedOut Then Exit For
+
+        PushParametersToOccurrence(
+            oAsm,
+            oOcc,
+            paramNames,
+            topSystem,
+            processedCount,
+            pushedCount,
+            updatedComponents,
+            report)
+
+    Next
+
+End Sub
+
+
+'====================================================
+' FIND ALL OCCURRENCES BY TITLE ANYWHERE IN ASSEMBLY
+'====================================================
+Sub FindOccurrencesByTitleInAssembly(
+    oAsm As AssemblyDocument,
+    targetTitle As String,
+    ByRef foundList As System.Collections.Generic.List(Of ComponentOccurrence),
+    sw As System.Diagnostics.Stopwatch,
+    maxSeconds As Double,
+    ByRef timedOut As Boolean)
+
+    Try
+        For Each oOcc As ComponentOccurrence In oAsm.ComponentDefinition.Occurrences
+
+            If sw.Elapsed.TotalSeconds > maxSeconds Then
+                timedOut = True
+                Exit Sub
+            End If
+
+            FindOccurrencesByTitleInOccurrence(
+                oOcc,
+                targetTitle,
+                foundList,
+                sw,
+                maxSeconds,
+                timedOut)
+
+            If timedOut Then Exit Sub
+
+        Next
+    Catch
+    End Try
+
+End Sub
+
+
+'====================================================
+' RECURSIVE TITLE SEARCH
+' FINDS TARGET TITLE NO MATTER WHERE IT IS NESTED
+'====================================================
+Sub FindOccurrencesByTitleInOccurrence(
+    oOcc As ComponentOccurrence,
+    targetTitle As String,
+    ByRef foundList As System.Collections.Generic.List(Of ComponentOccurrence),
+    sw As System.Diagnostics.Stopwatch,
+    maxSeconds As Double,
+    ByRef timedOut As Boolean)
+
+    Try
+        If sw.Elapsed.TotalSeconds > maxSeconds Then
+            timedOut = True
+            Exit Sub
+        End If
+
+        If oOcc.Suppressed Then Exit Sub
+
+        If IsExactTitle(oOcc, targetTitle) Then
+            foundList.Add(oOcc)
+        End If
+
+        If oOcc.DefinitionDocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            Dim subDef As AssemblyComponentDefinition = TryCast(oOcc.Definition, AssemblyComponentDefinition)
+
+            If subDef IsNot Nothing Then
+
+                For Each subOcc As ComponentOccurrence In subDef.Occurrences
+
+                    FindOccurrencesByTitleInOccurrence(
+                        subOcc,
+                        targetTitle,
+                        foundList,
+                        sw,
+                        maxSeconds,
+                        timedOut)
+
+                    If timedOut Then Exit Sub
+
+                Next
+
+            End If
+
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+'====================================================
+' PUSH PARAMETERS TO ONE OCCURRENCE
+'====================================================
+Sub PushParametersToOccurrence(
+    topAsm As AssemblyDocument,
+    oOcc As ComponentOccurrence,
+    paramNames() As String,
+    topSystem As String,
+    ByRef processedCount As Integer,
+    ByRef pushedCount As Integer,
+    ByRef updatedComponents As System.Collections.Generic.List(Of String),
+    ByRef report As String)
+
+    Try
+
+        Dim childDoc As Document = TryCast(oOcc.Definition.Document, Document)
+
+        If childDoc Is Nothing Then Exit Sub
+
+        Dim compTitle As String = GetOccurrenceTitle(oOcc)
+        Dim compName As String = GetOccurrenceNameOnly(oOcc)
+        Dim compDocName As String = GetOccurrenceDocumentDisplayName(oOcc)
+
+        If Not IsAllowedTargetTitle(compTitle) Then Exit Sub
+
+        ' Skip existing Vault files.
+        ' Only push into child files created during this configurator run.
+        If Not WasChildFileCreatedByConfigurator(childDoc) Then Exit Sub
+
+        Dim thisComponentUpdated As Boolean = False
+
+        processedCount += 1
+
+        '====================================================
+        ' PUSH PARAMETERS
+        '====================================================
+        For Each pName As String In paramNames
+
+            Try
+
+                If PushOneParameter(
+                    topAsm,
+                    childDoc,
+                    pName,
+                    topSystem,
+                    compTitle,
+                    compName,
+                    compDocName) Then
+
+                    pushedCount += 1
+                    thisComponentUpdated = True
+
+                End If
+
+            Catch ex As Exception
+
+                report &= childDoc.DisplayName _
+                       & " | Parameter: " & pName _
+                       & " | Error: " & ex.Message _
+                       & vbCrLf
+
+            End Try
+
+        Next
+
+		'====================================================
+		' SET CREATION DATE / AUTHOR / DESIGNER / PROJECT
+		'====================================================
+		If thisComponentUpdated Then
+		
+		    Try
+		
+		        Dim inventorUserName As String =
+		            Trim(CStr(ThisApplication.GeneralOptions.UserName))
+		
+		        If inventorUserName <> "" Then
+		
+		            ' Author
+		            childDoc.PropertySets.Item(
+		                "Inventor Summary Information") _
+		                .Item("Author").Value = inventorUserName
+		
+		            ' Designer
+		            childDoc.PropertySets.Item(
+		                "Design Tracking Properties") _
+		                .Item("Designer").Value = inventorUserName
+		
+		        End If
+		
+		        ' Project
+		        childDoc.PropertySets.Item(
+		            "Design Tracking Properties") _
+		            .Item("Project").Value = "MOBILE"
+		
+		        ' Creation Date
+		        childDoc.PropertySets.Item(
+		            "Design Tracking Properties") _
+		            .Item("Creation Time").Value = Now
+		
+		    Catch ex As Exception
+		
+		        report &= childDoc.DisplayName _
+		               & " | iProperty Error: " _
+		               & ex.Message _
+		               & vbCrLf
+		
+		    End Try
+
+            Dim nameToShow As String = ""
+
+            Try
+                nameToShow = childDoc.DisplayName
+            Catch
+                nameToShow = oOcc.Name
+            End Try
+
+            If Not updatedComponents.Contains(nameToShow) Then
+                updatedComponents.Add(nameToShow)
+            End If
+
+            '====================================================
+            ' UPDATE COMPONENT
+            '====================================================
+            Try
+
+                If childDoc.DocumentType =
+                    DocumentTypeEnum.kPartDocumentObject Then
+
+                    CType(childDoc, PartDocument).Update2(True)
+
+                ElseIf childDoc.DocumentType =
+                    DocumentTypeEnum.kAssemblyDocumentObject Then
+
+                    CType(childDoc, AssemblyDocument).Update2(True)
+
+                End If
+
+            Catch
+            End Try
+
+        End If
+
+    Catch ex As Exception
+
+        report &= "Could not process " _
+               & oOcc.Name _
+               & " - " _
+               & ex.Message _
+               & vbCrLf
+
+    End Try
+
+End Sub
+
+
+'====================================================
+' PUSH ONE PARAMETER
+'
+' The Drive Assembly keeps its original System value.
+' All allowed child components always receive:
+' System = RX
+'====================================================
+Function PushOneParameter(
+    topAsm As AssemblyDocument,
+    childDoc As Document,
+    paramName As String,
+    topSystem As String,
+    compTitle As String,
+    compName As String,
+    compDocName As String) As Boolean
+
+    Dim sourceParam As Inventor.Parameter =
+        GetParameterFromDocument(topAsm, paramName)
+
+    Dim targetParam As Inventor.Parameter =
+        GetParameterFromDocument(childDoc, paramName)
+
+    If targetParam Is Nothing Then Return False
+
+    '====================================================
+    ' FORCE CHILD COMPONENT SYSTEM TO RX
+    '
+    ' This changes System only in the allowed child
+    ' components processed by this rule:
+    '
+    ' DRIVE FRAME
+    ' CYLINDER MOUNT
+    ' CYLINDER MOUNT ASSY
+    ' STIFFENER
+    ' CROSSMEMBER
+    '
+    ' The top-level Drive Assembly is not changed.
+    '====================================================
+    If UCase(Trim(paramName)) = "SYSTEM" Then
+
+        If IsTextParameter(targetParam) Then
+            targetParam.Value = "RX"
+        Else
+            targetParam.Expression = "RX"
+        End If
+
+        Return True
+
+    End If
+
+    '====================================================
+    ' SPECIAL RX2 CC OVERRIDE
+    '
+    ' This still checks the System value from the
+    ' top-level Drive Assembly. Therefore, when the
+    ' Drive Assembly System is RX2, CC is forced to
+    ' 5.0 in in the selected child components.
+    '====================================================
+    If UCase(Trim(paramName)) = "CC" Then
+
+        If UCase(Trim(topSystem)) = "RX2" Then
+
+            If IsSpecialRx2Component(
+                compTitle,
+                compName,
+                compDocName) Then
+
+                Dim pSpecialRX2CC As String = "5.0 in"
+
+                If IsTextParameter(targetParam) Then
+                    targetParam.Value = pSpecialRX2CC
+                Else
+                    targetParam.Expression = pSpecialRX2CC
+                End If
+
+                Return True
+
+            End If
+
+        End If
+
+    End If
+
+    ' The top-level assembly must contain the source
+    ' parameter for all normal parameter pushes.
+    If sourceParam Is Nothing Then Return False
+
+    '====================================================
+    ' NORMAL PARAMETER PUSH
+    '====================================================
+    If IsTextParameter(targetParam) Then
+
+        If IsTextParameter(sourceParam) Then
+            targetParam.Value = CStr(sourceParam.Value)
+        Else
+            targetParam.Value = CStr(sourceParam.Expression)
+        End If
+
+    Else
+
+        If IsTextParameter(sourceParam) Then
+            targetParam.Expression = CStr(sourceParam.Value)
+        Else
+            targetParam.Expression = sourceParam.Expression
+        End If
+
+    End If
+
+    Return True
+
+End Function
+
+
+'====================================================
+' GET PARAMETER FROM PART OR ASSEMBLY
+'====================================================
+Function GetParameterFromDocument(oDoc As Document, paramName As String) As Inventor.Parameter
+
+    Try
+        If oDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+
+            Dim asmDoc As AssemblyDocument = CType(oDoc, AssemblyDocument)
+            Return asmDoc.ComponentDefinition.Parameters.Item(paramName)
+
+        ElseIf oDoc.DocumentType = DocumentTypeEnum.kPartDocumentObject Then
+
+            Dim partDoc As PartDocument = CType(oDoc, PartDocument)
+            Return partDoc.ComponentDefinition.Parameters.Item(paramName)
+
+        End If
+
+    Catch
+        Return Nothing
+    End Try
+
+    Return Nothing
+
+End Function
+
+
+'====================================================
+' CHECK IF PARAMETER IS TEXT
+'====================================================
+Function IsTextParameter(oParam As Inventor.Parameter) As Boolean
+
+    Try
+        If TypeOf oParam.Value Is String Then Return True
+    Catch
+    End Try
+
+    Try
+        If UCase(CStr(oParam.Units)) = "TEXT" Then Return True
+    Catch
+    End Try
+
+    Return False
+
+End Function
+
+
+'====================================================
+' ONLY THESE TITLES CAN BE UPDATED
+' REINFORCEMENT PLATE IS INTENTIONALLY NOT INCLUDED
+'====================================================
+Function IsAllowedTargetTitle(compTitle As String) As Boolean
+
+    Dim t As String = UCase(Trim(compTitle))
+
+    If t = "DRIVE FRAME" Then Return True
+    If t = "CYLINDER MOUNT" Then Return True
+    If t = "CYLINDER MOUNT ASSEMBLY" Then Return True
+    If t = "STIFFENER" Then Return True
+    If t = "CROSSMEMBER" Then Return True
+
+    Return False
+
+End Function
+
+
+'====================================================
+' EXACT TITLE MATCH
+'====================================================
+Function IsExactTitle(oOcc As ComponentOccurrence, targetTitle As String) As Boolean
+
+    Dim t As String = UCase(Trim(GetOccurrenceTitle(oOcc)))
+    Dim e As String = UCase(Trim(targetTitle))
+
+    If t = e Then Return True
+
+    Return False
+
+End Function
+
+
+'====================================================
+' SPECIAL RX2 COMPONENT LIST
+' REINFORCEMENT PLATE IS INTENTIONALLY NOT INCLUDED
+'====================================================
+Function IsSpecialRx2Component(compTitle As String, compName As String, compDocName As String) As Boolean
+
+    Dim t As String = UCase(Trim(compTitle))
+
+    If t = "DRIVE FRAME" Then Return True
+    If t = "CYLINDER MOUNT" Then Return True
+    If t = "CYLINDER MOUNT ASSEMBLY" Then Return True
+    If t = "STIFFENER" Then Return True
+    If t = "CROSSMEMBER" Then Return True
+
+    Return False
+
+End Function
+
+
+'====================================================
+' GET OCCURRENCE TITLE iPROPERTY
+'====================================================
+Function GetOccurrenceTitle(oOcc As ComponentOccurrence) As String
+
+    Try
+        Return CStr(oOcc.Definition.Document.PropertySets.Item("Inventor Summary Information").Item("Title").Value)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET OCCURRENCE NAME
+'====================================================
+Function GetOccurrenceNameOnly(oOcc As ComponentOccurrence) As String
+
+    Try
+        Return CStr(oOcc.Name)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' GET OCCURRENCE DOCUMENT DISPLAY NAME
+'====================================================
+Function GetOccurrenceDocumentDisplayName(oOcc As ComponentOccurrence) As String
+
+    Try
+        Return CStr(oOcc.Definition.Document.DisplayName)
+    Catch
+        Return ""
+    End Try
+
+End Function
+
+
+'====================================================
+' WAS CHILD FILE CREATED BY CONFIGURATOR
+'
+' Returns True only if the file was created by
+' SaveAsCore() during this configurator run.
+'====================================================
+Function WasChildFileCreatedByConfigurator(ByVal oDoc As Document) As Boolean
+
+    Try
+
+        If oDoc Is Nothing Then Return False
+
+        Dim filePath As String = ""
+
+        Try
+            filePath = UCase(Trim(oDoc.FullFileName))
+        Catch
+            filePath = ""
+        End Try
+
+        If filePath = "" Then Return False
+
+        Dim createdList As String = ""
+
+        Try
+            createdList = UCase(CStr(SharedVariable("DriveConfig_CreatedChildFiles")))
+        Catch
+            createdList = ""
+        End Try
+
+        If createdList = "" Then Return False
+
+        If InStr(createdList, "|" & filePath & "|") > 0 Then
+            Return True
+        End If
+
+    Catch
+    End Try
+
+    Return False
+
+End Function

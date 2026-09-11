@@ -1,0 +1,25 @@
+﻿'==================================================
+' ADJUST SERIAL PLATE CONSTRAINT
+' External Rule
+'==================================================
+
+Dim ccValue As Double = Parameter("CC")
+Dim systemValue As String = Parameter("System")
+
+' RX2 SPECIAL CASE
+If systemValue = "RX2" And ccValue = 10 Then
+
+    Parameter("Serial_Plate_Constraint") = -12.375
+
+' STANDARD RULES
+ElseIf ccValue = 5 Then
+
+    Parameter("Serial_Plate_Constraint") = -12.375
+
+ElseIf ccValue = 10 Then
+
+    Parameter("Serial_Plate_Constraint") = -7.375
+
+End If
+
+InventorVb.DocumentUpdate()
